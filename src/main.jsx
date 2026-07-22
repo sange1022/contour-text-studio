@@ -22,6 +22,15 @@ function imageDimensions(url) {
   });
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 function buildContourAnalysis(image, settings) {
   const scale = Math.min(1, MAX_ANALYSIS_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
@@ -242,6 +251,7 @@ function CanvasArt({ phase, settings, source, toggles, customText, colors, tileS
   const headingSize = Math.max(9, minimumSide * 0.022);
   return <svg id="artboard" viewBox={`0 0 ${canvasWidth} ${canvasHeight}`} data-width={canvasWidth} data-height={canvasHeight} role="img" aria-label="轮廓海报画布">
     <rect className="canvas-background" width={canvasWidth} height={canvasHeight} fill={colors.background}/>
+    {hasImportedImage && toggles.original ? <image className="source-background" href={source.url} x="0" y="0" width={canvasWidth} height={canvasHeight} preserveAspectRatio="none"/> : null}
     <defs>
       <filter id="roundedContour" x="-10%" y="-10%" width="120%" height="120%">
         <feGaussianBlur stdDeviation={Math.max(0.4, minimumSide * 0.004 * phases[phase].radius / 100)}/>
@@ -284,6 +294,7 @@ function Inspector({ phase, setPhase, settings, setSettings, text, setText, togg
       <RangeRow label="最小面积" value={settings.area} max={800} unit=" px²" onChange={v=>set('area',v)}/>
       <div className="toggle-grid">
         <Toggle label="反转前景" checked={settings.invert} onChange={v=>set('invert',v)}/>
+        <Toggle label="显示原图" checked={toggles.original} onChange={v=>setToggles(t=>({...t,original:v}))}/>
         <Toggle label="显示主体" checked={toggles.shape} onChange={v=>setToggles(t=>({...t,shape:v}))}/>
         <Toggle label="外轮廓文字" checked={toggles.text} onChange={v=>setToggles(t=>({...t,text:v}))}/>
         <Toggle label="孔洞文字" checked={toggles.innerText} onChange={v=>setToggles(t=>({...t,innerText:v}))}/>
@@ -325,7 +336,7 @@ function App() {
   const [format,setFormat] = useState('PNG');
   const [transparent,setTransparent] = useState(false);
   const [toast,setToast] = useState('');
-  const [toggles,setToggles] = useState({shape:true,text:true,innerText:true});
+  const [toggles,setToggles] = useState({original:true,shape:false,text:true,innerText:true});
   const [tileShape,setTileShape] = useState('square');
   const [hollowTiles,setHollowTiles] = useState(false);
   const [colors,setColors] = useState({subject:'#2457ff',background:'#000000',tile:'#ffffff',tileBorder:'#d8d8d8',text:'#000000'});
@@ -338,7 +349,7 @@ function App() {
     const files = Array.from(e.target.files||[]).slice(0,Math.max(0,5-actualSourceCount));
     if (!files.length) return;
     const next = await Promise.all(files.map(async (file,i)=>{
-      const url=URL.createObjectURL(file);
+      const url=await fileToDataUrl(file);
       const dimensions=await imageDimensions(url);
       return {id:Date.now()+i,name:file.name.replace(/\.[^.]+$/,''),url,...dimensions};
     }));
@@ -351,7 +362,6 @@ function App() {
   };
   const removeSource = id => setSources(current=>{
     const target=current.find(source=>source.id===id);
-    if(target?.url) URL.revokeObjectURL(target.url);
     const next=current.filter(source=>source.id!==id);
     if(selected===id) setSelected(next[0]?.id ?? null);
     return next;
