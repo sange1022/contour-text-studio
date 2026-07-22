@@ -12,6 +12,14 @@ const phases = [
 
 const DEFAULT_CANVAS = { width: 800, height: 1000 };
 const MAX_ANALYSIS_EDGE = 560;
+const CANVAS_PRESETS = [
+  { value: 'original', label: '原图尺寸' },
+  { value: 'square', label: '1:1 · 1080 × 1080', width: 1080, height: 1080 },
+  { value: 'portrait', label: '3:4 · 1080 × 1440', width: 1080, height: 1440 },
+  { value: 'social', label: '4:5 · 1080 × 1350', width: 1080, height: 1350 },
+  { value: 'story', label: '9:16 · 1080 × 1920', width: 1080, height: 1920 },
+  { value: 'landscape', label: '16:9 · 1920 × 1080', width: 1920, height: 1080 },
+];
 
 function imageDimensions(url) {
   return new Promise((resolve, reject) => {
@@ -207,7 +215,7 @@ function SourcePanel({ sources, selected, onSelect, onImport, onRemove }) {
       </button>)}
       {sources.length < 5 ? <button className="dropzone" onClick={onImport}><Icon name="plus"/><strong>添加图片</strong><small>PNG / JPG / WEBP</small></button> : null}
     </div>
-    <p className="source-help">支持 1–5 张，画布使用当前图片原始尺寸。</p>
+    <p className="source-help">支持 1–5 张，画布可用原图或常用尺寸。</p>
   </div>;
 }
 
@@ -222,27 +230,32 @@ function ContourTile({ shape, hollow, size, radius, colors, strokeWidth, charact
   </g>;
 }
 
-function CanvasArt({ phase, settings, source, toggles, customText, colors, tileShape, hollowTiles }) {
+function CanvasArt({ phase, settings, source, toggles, customText, colors, tileShape, hollowTiles, canvasWidth, canvasHeight }) {
   const analysis = useContourAnalysis(source, settings);
   const words = (customText || 'FORM FOLLOWS FEELING').toUpperCase();
   const hasImportedImage = Boolean(source?.url);
-  const canvasWidth = source?.width || DEFAULT_CANVAS.width;
-  const canvasHeight = source?.height || DEFAULT_CANVAS.height;
   const minimumSide = Math.min(canvasWidth, canvasHeight);
+  const sourceWidth = source?.width || canvasWidth;
+  const sourceHeight = source?.height || canvasHeight;
+  const coverScale = Math.max(canvasWidth / sourceWidth, canvasHeight / sourceHeight);
+  const fittedWidth = sourceWidth * coverScale;
+  const fittedHeight = sourceHeight * coverScale;
+  const imageX = (canvasWidth - fittedWidth) / 2;
+  const imageY = (canvasHeight - fittedHeight) / 2;
   const edgeElements = useMemo(() => {
     if (!analysis?.edge.length) return [];
     const targetCount = Math.max(40, Math.round(60 + settings.density * 3.2));
     const step = Math.max(1, Math.ceil(analysis.edge.length / targetCount));
-    const scaleX = canvasWidth / analysis.width;
-    const scaleY = canvasHeight / analysis.height;
+    const scaleX = fittedWidth / analysis.width;
+    const scaleY = fittedHeight / analysis.height;
     return analysis.edge.filter((_, index) => index % step === 0).map((point, index) => ({
-      x: point.x * scaleX,
-      y: point.y * scaleY,
+      x: imageX + point.x * scaleX,
+      y: imageY + point.y * scaleY,
       inner: point.inner,
       size: Math.max(1.5, minimumSide * (settings.size / 1000) * (0.55 + (index % 5) * 0.12)),
       rotation: (index * 29) % 180,
     }));
-  }, [analysis, canvasWidth, canvasHeight, minimumSide, settings.density, settings.size]);
+  }, [analysis, fittedWidth, fittedHeight, imageX, imageY, minimumSide, settings.density, settings.size]);
   const showMask = phase === 0 || phase === 1 || phase === 4;
   const scatter = phase === 2 ? 1 + settings.spread / 260 : phase === 3 ? 1.02 : phase === 1 ? 0.99 : 1;
   const centerX = canvasWidth / 2;
@@ -251,7 +264,7 @@ function CanvasArt({ phase, settings, source, toggles, customText, colors, tileS
   const headingSize = Math.max(9, minimumSide * 0.022);
   return <svg id="artboard" viewBox={`0 0 ${canvasWidth} ${canvasHeight}`} data-width={canvasWidth} data-height={canvasHeight} role="img" aria-label="轮廓海报画布">
     <rect className="canvas-background" width={canvasWidth} height={canvasHeight} fill={colors.background}/>
-    {hasImportedImage && toggles.original ? <image className="source-background" href={source.url} x="0" y="0" width={canvasWidth} height={canvasHeight} preserveAspectRatio="none"/> : null}
+    {hasImportedImage && toggles.original ? <image className="source-background" href={source.url} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none"/> : null}
     <defs>
       <filter id="roundedContour" x="-10%" y="-10%" width="120%" height="120%">
         <feGaussianBlur stdDeviation={Math.max(0.4, minimumSide * 0.004 * phases[phase].radius / 100)}/>
@@ -260,8 +273,8 @@ function CanvasArt({ phase, settings, source, toggles, customText, colors, tileS
       <filter id="colorizeContour" colorInterpolationFilters="sRGB"><feFlood floodColor={colors.subject}/><feComposite in2="SourceAlpha" operator="in"/></filter>
     </defs>
     {hasImportedImage && !analysis ? <g className="analysis-loading" fill="#fff"><text x={centerX} y={centerY} textAnchor="middle" fontSize={headingSize}>正在识别图片轮廓…</text></g> : null}
-    {hasImportedImage && analysis && toggles.shape && showMask ? <g transform={`translate(${centerX} ${centerY}) scale(${phaseScale}) translate(${-centerX} ${-centerY})`} filter={phase === 1 ? 'url(#roundedContour)' : undefined}><image className={`detected-mask detected-mask-${phase}`} href={analysis.maskUrl} x="0" y="0" width={canvasWidth} height={canvasHeight} preserveAspectRatio="none" filter="url(#colorizeContour)" opacity={phase === 4 ? 0.88 : 1}/></g> : null}
-    {!hasImportedImage ? <g className="empty-poster" fill="#fff" opacity=".72"><text x={centerX} y={centerY - 8} textAnchor="middle" fontSize={Math.max(16, minimumSide * .026)} fontWeight="600">上传图片开始制作海报</text><text x={centerX} y={centerY + 24} textAnchor="middle" fontSize={Math.max(9, minimumSide * .014)} opacity=".65">画布将自动使用图片原始尺寸</text></g> : null}
+    {hasImportedImage && analysis && toggles.shape && showMask ? <g transform={`translate(${centerX} ${centerY}) scale(${phaseScale}) translate(${-centerX} ${-centerY})`} filter={phase === 1 ? 'url(#roundedContour)' : undefined}><image className={`detected-mask detected-mask-${phase}`} href={analysis.maskUrl} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none" filter="url(#colorizeContour)" opacity={phase === 4 ? 0.88 : 1}/></g> : null}
+    {!hasImportedImage ? <g className="empty-poster" fill="#fff" opacity=".72"><text x={centerX} y={centerY - 8} textAnchor="middle" fontSize={Math.max(16, minimumSide * .026)} fontWeight="600">上传图片开始制作海报</text><text x={centerX} y={centerY + 24} textAnchor="middle" fontSize={Math.max(9, minimumSide * .014)} opacity=".65">可在上方选择常用画布尺寸</text></g> : null}
     {analysis ? <g className="particles">
       {edgeElements.map((point, index) => {
         const textEnabled = point.inner ? toggles.innerText : toggles.text;
@@ -334,6 +347,7 @@ function App() {
   const [text,setText] = useState('FORM FOLLOWS FEELING');
   const [zoom,setZoom] = useState(100);
   const [format,setFormat] = useState('PNG');
+  const [canvasPreset,setCanvasPreset] = useState('original');
   const [transparent,setTransparent] = useState(false);
   const [toast,setToast] = useState('');
   const [toggles,setToggles] = useState({original:true,shape:false,text:true,innerText:true});
@@ -342,7 +356,8 @@ function App() {
   const [colors,setColors] = useState({subject:'#2457ff',background:'#000000',tile:'#ffffff',tileBorder:'#d8d8d8',text:'#000000'});
   const [settings,setSettings] = useState({threshold:155,smooth:2,area:28,invert:false,size:22,spread:30,density:58});
   const activeSource = sources.find(s=>s.id===selected);
-  const canvasSize = {width:activeSource?.width || DEFAULT_CANVAS.width,height:activeSource?.height || DEFAULT_CANVAS.height};
+  const selectedCanvasPreset = CANVAS_PRESETS.find(item=>item.value===canvasPreset);
+  const canvasSize = selectedCanvasPreset?.width ? {width:selectedCanvasPreset.width,height:selectedCanvasPreset.height} : {width:activeSource?.width || DEFAULT_CANVAS.width,height:activeSource?.height || DEFAULT_CANVAS.height};
   const actualSourceCount = sources.length;
   const triggerImport = ()=>fileRef.current?.click();
   const onFiles = async e => {
@@ -387,8 +402,8 @@ function App() {
       <Inspector phase={phase} setPhase={setPhase} settings={settings} setSettings={setSettings} text={text} setText={setText} toggles={toggles} setToggles={setToggles} colors={colors} setColors={setColors} tileShape={tileShape} setTileShape={setTileShape} hollowTiles={hollowTiles} setHollowTiles={setHollowTiles} transparent={transparent} setTransparent={setTransparent}/>
     </aside>
     <main className="workspace">
-      <div className="canvas-toolbar"><strong>海报画布</strong><span>原始尺寸：{canvasSize.width} × {canvasSize.height} px</span><button onClick={()=>setZoom(z=>Math.max(50,z-10))}><Icon name="zoomOut"/></button><output>{zoom}%</output><button onClick={()=>setZoom(z=>Math.min(130,z+10))}><Icon name="zoomIn"/></button></div>
-      <div className="canvas-viewport"><div className="canvas-sheet" style={{transform:`scale(${zoom/100})`,aspectRatio:`${canvasSize.width}/${canvasSize.height}`}}><CanvasArt phase={phase} settings={settings} source={activeSource} toggles={toggles} customText={text} colors={colors} tileShape={tileShape} hollowTiles={hollowTiles}/></div></div>
+      <div className="canvas-toolbar"><strong>海报画布</strong><label className="canvas-size"><span>尺寸</span><select aria-label="画布尺寸" value={canvasPreset} onChange={event=>{setCanvasPreset(event.target.value);setZoom(100)}}>{CANVAS_PRESETS.map(item=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label><span>{canvasSize.width} × {canvasSize.height} px</span><button onClick={()=>setZoom(z=>Math.max(50,z-10))}><Icon name="zoomOut"/></button><output>{zoom}%</output><button onClick={()=>setZoom(z=>Math.min(130,z+10))}><Icon name="zoomIn"/></button></div>
+      <div className="canvas-viewport"><div className="canvas-sheet" style={{transform:`scale(${zoom/100})`,aspectRatio:`${canvasSize.width}/${canvasSize.height}`}}><CanvasArt phase={phase} settings={settings} source={activeSource} toggles={toggles} customText={text} colors={colors} tileShape={tileShape} hollowTiles={hollowTiles} canvasWidth={canvasSize.width} canvasHeight={canvasSize.height}/></div></div>
     </main>
     {toast ? <div className="toast">{toast}</div> : null}
   </div>;
