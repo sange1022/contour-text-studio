@@ -4,7 +4,19 @@ import { fileToDataUrl, imageDimensions, useContourAnalysis } from './contour';
 import './styles.css';
 
 const DEFAULT_CANVAS = { width: 1080, height: 1350 };
-const DEFAULT_CELL = { x: 0, y: 0, scaleX: 100, scaleY: 100, skew: 0, blur: 0 };
+const DEFAULT_CELL = { x: 0, y: 0, scaleX: 100, scaleY: 100, skew: 0, blur: 0, effect: 'none', intensity: 72 };
+const TECH_EFFECTS = [
+  { id: 'glitch', name: '数据故障', code: 'GL', preset: { x: 28, scaleX: 148, skew: -8 } },
+  { id: 'slice', name: '数字切片', code: 'SL', preset: { x: -38, scaleX: 172, scaleY: 82 } },
+  { id: 'scanline', name: 'CRT 扫描', code: 'CR', preset: { scaleX: 138, scaleY: 72 } },
+  { id: 'hologram', name: '全息偏色', code: 'HO', preset: { x: 16, scaleX: 152, skew: 7 } },
+  { id: 'ripple', name: '信号波纹', code: 'RP', preset: { scaleX: 142, scaleY: 88 } },
+  { id: 'liquid', name: '液态融化', code: 'LQ', preset: { y: 24, scaleX: 128, scaleY: 146, skew: 12 } },
+  { id: 'glass', name: '玻璃折射', code: 'RF', preset: { x: 20, scaleX: 158, scaleY: 78, blur: 1 } },
+  { id: 'thermal', name: '热成像', code: 'TH', preset: { scaleX: 134, scaleY: 92 } },
+  { id: 'xray', name: 'X 光反相', code: 'XR', preset: { scaleX: 126, scaleY: 68, skew: -5 } },
+  { id: 'halftone', name: '数码网点', code: 'HT', preset: { scaleX: 146, scaleY: 76 } },
+];
 const PHASES = [
   { name: '贴合', radius: 8 },
   { name: '圆化', radius: 72 },
@@ -124,6 +136,8 @@ function WarpControls({ warp, setWarp }) {
   const cell = warp.cells[warp.selected] || DEFAULT_CELL;
   const updateCell = (field, value) => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...current.cells[current.selected],[field]:value}}}));
   const applyPreset = preset => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...preset}}}));
+  const applyEffect = effect => applyPreset({ effect: effect.id, intensity: 72, ...effect.preset });
+  const activeEffect = TECH_EFFECTS.find(effect=>effect.id === cell.effect);
   return <>
     <div className="warp-heading"><Toggle label="局部网格变形" checked={warp.enabled} onChange={enabled=>setWarp(current=>({...current,enabled}))}/><small>{warp.columns} × {warp.rows}</small></div>
     {warp.enabled ? <>
@@ -136,12 +150,12 @@ function WarpControls({ warp, setWarp }) {
       <RangeRow label="纵向压缩" value={cell.scaleY} min={20} max={180} unit="%" onChange={value=>updateCell('scaleY',value)}/>
       <RangeRow label="倾斜" value={cell.skew} min={-40} max={40} unit="°" onChange={value=>updateCell('skew',value)}/>
       <RangeRow label="模糊" value={cell.blur} min={0} max={18} unit=" px" onChange={value=>updateCell('blur',value)}/>
-      <div className="warp-presets">
-        <button onClick={()=>applyPreset({scaleX:165})}>横向拉伸</button>
-        <button onClick={()=>applyPreset({scaleY:42})}>纵向压扁</button>
-        <button onClick={()=>applyPreset({blur:8})}>柔焦</button>
-        <button onClick={()=>applyPreset(DEFAULT_CELL)}>重置区域</button>
+      {activeEffect ? <RangeRow label="特效强度" value={cell.intensity} min={10} max={100} unit="%" onChange={value=>updateCell('intensity',value)}/> : null}
+      <div className="effect-heading"><span>科技感特效 · 10</span><b>{activeEffect?.code || 'OFF'}</b></div>
+      <div className="tech-effects">
+        {TECH_EFFECTS.map(effect=><button key={effect.id} className={cell.effect === effect.id ? 'active' : ''} onClick={()=>applyEffect(effect)}><b>{effect.code}</b><span>{effect.name}</span></button>)}
       </div>
+      <button className="reset-effect" onClick={()=>applyPreset(DEFAULT_CELL)}><Icon name="reset" size={13}/>恢复选中区域</button>
     </> : null}
   </>;
 }
@@ -216,6 +230,46 @@ function ContourTile({ shape, hollow, size, radius, colors, strokeWidth, charact
   return <g>{shape === 'circle' ? <circle r={size} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/> : shape === 'triangle' ? <path d={`M0 ${-size * 1.16} L${size * 1.08} ${size * .88} L${-size * 1.08} ${size * .88} Z`} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/> : <rect x={-size} y={-size} width={size * 2} height={size * 2} rx={radius} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/>}<text fill={textColor} fontSize={size * 1.12} fontWeight="700" textAnchor="middle" dominantBaseline="central" transform={`translate(0 ${shape === 'triangle' ? size * .12 : 0}) rotate(${-rotation})`}>{character}</text></g>;
 }
 
+function TechFilter({ index, cell }) {
+  const intensity = cell.intensity ?? 72;
+  const effect = cell.effect || 'none';
+  const amount = intensity / 100;
+  const content = {
+    glitch: <><feOffset in="SourceGraphic" dx={22 * amount} result="shiftR"/><feColorMatrix in="shiftR" values="1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="red"/><feOffset in="SourceGraphic" dx={-22 * amount} result="shiftC"/><feColorMatrix in="shiftC" values="0 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0" result="cyan"/><feBlend in="red" in2="cyan" mode="screen" result="split"/><feBlend in="SourceGraphic" in2="split" mode="screen"/></>,
+    slice: <><feTurbulence type="fractalNoise" baseFrequency={`0.006 ${0.08 + amount * .12}`} numOctaves="1" seed={index + 11} result="sliceNoise"/><feDisplacementMap in="SourceGraphic" in2="sliceNoise" scale={38 + 92 * amount} xChannelSelector="R" yChannelSelector="B"/></>,
+    scanline: <><feColorMatrix type="saturate" values={.35 + amount * .35}/><feComponentTransfer><feFuncR type="linear" slope={1.15 + amount * .45}/><feFuncG type="linear" slope={1.05}/><feFuncB type="linear" slope={1.2 + amount * .25}/></feComponentTransfer></>,
+    hologram: <><feColorMatrix type="hueRotate" values={120 + intensity * 2}/><feColorMatrix type="saturate" values={1.7 + amount * 2.3}/><feOffset dx={10 * amount} result="holoShift"/><feBlend in="SourceGraphic" in2="holoShift" mode="screen"/></>,
+    ripple: <><feTurbulence type="turbulence" baseFrequency={`${.01 + amount * .014} ${.035 + amount * .035}`} numOctaves="1" seed={index + 23} result="rippleNoise"/><feDisplacementMap in="SourceGraphic" in2="rippleNoise" scale={22 + intensity * .75} xChannelSelector="R" yChannelSelector="G"/></>,
+    liquid: <><feTurbulence type="fractalNoise" baseFrequency={`${.006 + amount * .006} ${.012 + amount * .01}`} numOctaves="2" seed={index + 37} result="liquidNoise"/><feDisplacementMap in="SourceGraphic" in2="liquidNoise" scale={35 + intensity * 1.15} xChannelSelector="B" yChannelSelector="R"/></>,
+    glass: <><feTurbulence type="fractalNoise" baseFrequency={`${.018 + amount * .015} ${.008 + amount * .01}`} numOctaves="1" seed={index + 49} result="glassNoise"/><feDisplacementMap in="SourceGraphic" in2="glassNoise" scale={18 + intensity * .72} xChannelSelector="R" yChannelSelector="B"/><feComponentTransfer><feFuncR type="linear" slope="1.15" intercept=".02"/><feFuncG type="linear" slope="1.08"/><feFuncB type="linear" slope="1.22" intercept=".03"/></feComponentTransfer></>,
+    thermal: <><feColorMatrix type="saturate" values="0" result="thermalGray"/><feComponentTransfer in="thermalGray"><feFuncR type="table" tableValues="0 .15 .95 1 1"/><feFuncG type="table" tableValues="0 .05 .75 .95 .15"/><feFuncB type="table" tableValues=".45 .95 .35 .05 0"/></feComponentTransfer></>,
+    xray: <><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncR type="linear" slope={-1.2 - amount * .5} intercept="1.15"/><feFuncG type="linear" slope={-1.1 - amount * .35} intercept="1.08"/><feFuncB type="linear" slope={-1.35 - amount * .55} intercept="1.28"/></feComponentTransfer></>,
+    halftone: <><feColorMatrix type="saturate" values="0"/><feComponentTransfer><feFuncR type="discrete" tableValues="0 .18 .48 .78 1"/><feFuncG type="discrete" tableValues="0 .18 .48 .78 1"/><feFuncB type="discrete" tableValues="0 .18 .48 .78 1"/></feComponentTransfer></>,
+  }[effect];
+  if (!content && cell.blur <= 0) return null;
+  return <filter id={`tech-filter-${index}`} x="-45%" y="-45%" width="190%" height="190%" colorInterpolationFilters="sRGB">{content}{cell.blur > 0 ? <feGaussianBlur stdDeviation={cell.blur}/> : null}</filter>;
+}
+
+function EffectDefinitions({ index, cell }) {
+  const intensity = cell.intensity ?? 72;
+  return <>
+    <TechFilter index={index} cell={cell}/>
+    {cell.effect === 'scanline' ? <pattern id={`scanline-${index}`} width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="3" fill="#39ffea" opacity={.18 + intensity / 180}/><rect y="4" width="8" height="1" fill="#2457ff" opacity=".72"/></pattern> : null}
+    {cell.effect === 'halftone' ? <pattern id={`halftone-${index}`} width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="4" cy="4" r={2 + intensity / 40} fill="#2457ff" opacity=".78"/><circle cx="12" cy="12" r={1.5 + intensity / 55} fill="#00e8ff" opacity=".62"/></pattern> : null}
+    {cell.effect === 'hologram' ? <linearGradient id={`hologram-${index}`} x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#00fff0" stopOpacity=".7"/><stop offset=".48" stopColor="#2457ff" stopOpacity=".1"/><stop offset="1" stopColor="#ff2bd6" stopOpacity=".72"/></linearGradient> : null}
+    {cell.effect === 'glass' ? <linearGradient id={`glass-${index}`} x1="0" y1="0" x2="1" y2="0"><stop offset="0" stopColor="#fff" stopOpacity=".08"/><stop offset=".45" stopColor="#fff" stopOpacity=".6"/><stop offset=".55" stopColor="#9dfcff" stopOpacity=".12"/><stop offset="1" stopColor="#fff" stopOpacity=".34"/></linearGradient> : null}
+  </>;
+}
+
+function CellEffectOverlay({ index, cell, x, y, width, height }) {
+  if (cell.effect === 'scanline') return <rect x={x} y={y} width={width} height={height} fill={`url(#scanline-${index})`} style={{mixBlendMode:'screen'}}/>;
+  if (cell.effect === 'halftone') return <rect x={x} y={y} width={width} height={height} fill={`url(#halftone-${index})`} style={{mixBlendMode:'multiply'}}/>;
+  if (cell.effect === 'hologram') return <rect x={x} y={y} width={width} height={height} fill={`url(#hologram-${index})`} opacity={(cell.intensity ?? 72) / 145} style={{mixBlendMode:'screen'}}/>;
+  if (cell.effect === 'glass') return <rect x={x} y={y} width={width} height={height} fill={`url(#glass-${index})`} opacity=".72" style={{mixBlendMode:'screen'}}/>;
+  if (cell.effect === 'glitch') return <g opacity=".82"><rect x={x} y={y + height * .18} width={width} height={Math.max(3,height * .035)} fill="#ff1f7a"/><rect x={x} y={y + height * .66} width={width} height={Math.max(2,height * .02)} fill="#00f7ff"/></g>;
+  return null;
+}
+
 function LocalWarpLayer({ canvasWidth, canvasHeight, warp, onSelect }) {
   const cellWidth = canvasWidth / warp.columns;
   const cellHeight = canvasHeight / warp.rows;
@@ -225,7 +279,7 @@ function LocalWarpLayer({ canvasWidth, canvasHeight, warp, onSelect }) {
       const column = index % warp.columns;
       const row = Math.floor(index / warp.columns);
       const cell = warp.cells[index] || DEFAULT_CELL;
-      return <React.Fragment key={index}><clipPath id={`warp-clip-${index}`}><rect x={column * cellWidth} y={row * cellHeight} width={cellWidth + .5} height={cellHeight + .5}/></clipPath>{cell.blur > 0 ? <filter id={`warp-blur-${index}`} x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation={cell.blur}/></filter> : null}</React.Fragment>;
+      return <React.Fragment key={index}><clipPath id={`warp-clip-${index}`}><rect x={column * cellWidth} y={row * cellHeight} width={cellWidth + .5} height={cellHeight + .5}/></clipPath><EffectDefinitions index={index} cell={cell}/></React.Fragment>;
     })}</defs>
     <g className="local-warp-layer">{cells.map(index=>{
       const column = index % warp.columns;
@@ -234,7 +288,8 @@ function LocalWarpLayer({ canvasWidth, canvasHeight, warp, onSelect }) {
       const centerX = (column + .5) * cellWidth;
       const centerY = (row + .5) * cellHeight;
       const transform = `translate(${centerX + cell.x} ${centerY + cell.y}) skewX(${cell.skew}) scale(${cell.scaleX / 100} ${cell.scaleY / 100}) translate(${-centerX} ${-centerY})`;
-      return <g key={index} clipPath={`url(#warp-clip-${index})`}><g transform={transform} filter={cell.blur > 0 ? `url(#warp-blur-${index})` : undefined}><use href="#source-master"/></g></g>;
+      const filtered = cell.effect !== 'none' || cell.blur > 0;
+      return <g key={index} clipPath={`url(#warp-clip-${index})`}><g transform={transform} filter={filtered ? `url(#tech-filter-${index})` : undefined}><use href="#source-master"/></g><CellEffectOverlay index={index} cell={cell} x={column * cellWidth} y={row * cellHeight} width={cellWidth} height={cellHeight}/></g>;
     })}</g>
     <g className="editor-only warp-selectors">{cells.map(index=>{
       const column = index % warp.columns;
