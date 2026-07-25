@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { fileToDataUrl, imageDimensions, useContourAnalysis } from './contour';
 import './styles.css';
@@ -73,6 +73,11 @@ function Icon({ name, size = 18 }) {
     grid: <><path d="M4 4h16v16H4zM4 9h16M4 15h16M9 4v16M15 4v16"/></>,
     frame: <path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/>,
     reset: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6"/><path d="M4 4v4.6h4.6"/></>,
+    material: <><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></>,
+    template: <><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v5h5M9 12h7M9 16h7"/></>,
+    warp: <><path d="M4 5c4 3 12-3 16 0M4 12c4 3 12-3 16 0M4 19c4 3 12-3 16 0"/><path d="M5 4c3 4-3 12 0 16M12 4c3 4-3 12 0 16M19 4c3 4-3 12 0 16"/></>,
+    contour: <path d="M12 3c4.8 0 8 3.7 8 8.5S16.8 21 12 21s-8-4.7-8-9.5S7.2 3 12 3Z"/>,
+    type: <><path d="M5 5h14M12 5v14M8 19h8"/></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -83,7 +88,7 @@ function Button({ children, icon, primary, onClick, className = '', disabled = f
 
 function Topbar({ onImport, onExport, format, setFormat, exportScale, setExportScale }) {
   return <header className="topbar">
-    <div className="brand"><strong>轮廓文字</strong><span>专业静态海报编辑器</span></div>
+    <div className="brand"><strong>轮廓文字</strong><span>静态海报工作台</span></div>
     <div className="utilities">
       <Button icon="upload" onClick={onImport}>导入素材</Button>
       <select aria-label="导出格式" value={format} onChange={event=>setFormat(event.target.value)}><option>PNG</option><option>SVG</option></select>
@@ -91,6 +96,18 @@ function Topbar({ onImport, onExport, format, setFormat, exportScale, setExportS
       <Button icon="export" primary onClick={onExport}>导出海报</Button>
     </div>
   </header>;
+}
+
+const PANEL_ITEMS = [
+  { id: 'materials', label: '素材', icon: 'material' },
+  { id: 'templates', label: '模板', icon: 'template' },
+  { id: 'warp', label: '变形', icon: 'warp' },
+  { id: 'contour', label: '轮廓', icon: 'contour' },
+  { id: 'type', label: '文字', icon: 'type' },
+];
+
+function ToolRail({ active, onChange }) {
+  return <nav className="tool-rail" aria-label="编辑工具">{PANEL_ITEMS.map(item=><button key={item.id} className={active === item.id ? 'active' : ''} onClick={()=>onChange(item.id)}><Icon name={item.icon} size={22}/><span>{item.label}</span></button>)}</nav>;
 }
 
 function Section({ number, title, children }) {
@@ -132,7 +149,12 @@ function TemplateStrip({ selected, onApply }) {
   </button>)}</div>;
 }
 
+function MiniGrid({ columns, rows, selected }) {
+  return <span className="mini-grid" style={{gridTemplateColumns:`repeat(${columns},1fr)`}}>{Array.from({length:columns * rows},(_,index)=><i key={index} className={index === selected ? 'active' : ''}/>)}</span>;
+}
+
 function WarpControls({ warp, setWarp }) {
+  const [advancedOpen,setAdvancedOpen] = useState(false);
   const cell = warp.cells[warp.selected] || DEFAULT_CELL;
   const updateCell = (field, value) => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...current.cells[current.selected],[field]:value}}}));
   const applyPreset = preset => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...preset}}}));
@@ -141,35 +163,39 @@ function WarpControls({ warp, setWarp }) {
   return <>
     <div className="warp-heading"><Toggle label="局部网格变形" checked={warp.enabled} onChange={enabled=>setWarp(current=>({...current,enabled}))}/><small>{warp.columns} × {warp.rows}</small></div>
     {warp.enabled ? <>
-      <RangeRow label="横向格数" value={warp.columns} min={2} max={12} onChange={columns=>setWarp(current=>({...current,columns,selected:0,cells:{}}))}/>
-      <RangeRow label="纵向格数" value={warp.rows} min={2} max={16} onChange={rows=>setWarp(current=>({...current,rows,selected:0,cells:{}}))}/>
-      <div className="selected-cell">选中区域 <b>{String(warp.selected + 1).padStart(2, '0')}</b></div>
-      <RangeRow label="X 位移" value={cell.x} min={-120} max={120} unit=" px" onChange={value=>updateCell('x',value)}/>
-      <RangeRow label="Y 位移" value={cell.y} min={-120} max={120} unit=" px" onChange={value=>updateCell('y',value)}/>
-      <RangeRow label="横向拉伸" value={cell.scaleX} min={40} max={220} unit="%" onChange={value=>updateCell('scaleX',value)}/>
-      <RangeRow label="纵向压缩" value={cell.scaleY} min={20} max={180} unit="%" onChange={value=>updateCell('scaleY',value)}/>
-      <RangeRow label="倾斜" value={cell.skew} min={-40} max={40} unit="°" onChange={value=>updateCell('skew',value)}/>
-      <RangeRow label="模糊" value={cell.blur} min={0} max={18} unit=" px" onChange={value=>updateCell('blur',value)}/>
+      <div className="grid-counts"><RangeRow label="横向格子" value={warp.columns} min={2} max={12} onChange={columns=>setWarp(current=>({...current,columns,selected:0,cells:{}}))}/><RangeRow label="纵向格子" value={warp.rows} min={2} max={16} onChange={rows=>setWarp(current=>({...current,rows,selected:0,cells:{}}))}/></div>
+      <div className="selected-region"><MiniGrid columns={warp.columns} rows={warp.rows} selected={warp.selected}/><span><small>选中区域</small><strong>区域 {String(warp.selected + 1).padStart(2, '0')}</strong><em>第 {warp.selected % warp.columns + 1} 列 · 第 {Math.floor(warp.selected / warp.columns) + 1} 行</em></span></div>
       {activeEffect ? <RangeRow label="特效强度" value={cell.intensity} min={10} max={100} unit="%" onChange={value=>updateCell('intensity',value)}/> : null}
       <div className="effect-heading"><span>科技感特效 · 10</span><b>{activeEffect?.code || 'OFF'}</b></div>
       <div className="tech-effects">
         {TECH_EFFECTS.map(effect=><button key={effect.id} className={cell.effect === effect.id ? 'active' : ''} onClick={()=>applyEffect(effect)}><b>{effect.code}</b><span>{effect.name}</span></button>)}
       </div>
+      <button className={`advanced-toggle ${advancedOpen ? 'open' : ''}`} onClick={()=>setAdvancedOpen(value=>!value)}><span>精细调整 · 位移 / 拉伸 / 倾斜 / 模糊</span><i/></button>
+      {advancedOpen ? <div className="advanced-controls">
+        <RangeRow label="X 位移" value={cell.x} min={-120} max={120} unit=" px" onChange={value=>updateCell('x',value)}/>
+        <RangeRow label="Y 位移" value={cell.y} min={-120} max={120} unit=" px" onChange={value=>updateCell('y',value)}/>
+        <RangeRow label="横向拉伸" value={cell.scaleX} min={40} max={220} unit="%" onChange={value=>updateCell('scaleX',value)}/>
+        <RangeRow label="纵向压缩" value={cell.scaleY} min={20} max={180} unit="%" onChange={value=>updateCell('scaleY',value)}/>
+        <RangeRow label="倾斜" value={cell.skew} min={-40} max={40} unit="°" onChange={value=>updateCell('skew',value)}/>
+        <RangeRow label="模糊" value={cell.blur} min={0} max={18} unit=" px" onChange={value=>updateCell('blur',value)}/>
+      </div> : null}
       <button className="reset-effect" onClick={()=>applyPreset(DEFAULT_CELL)}><Icon name="reset" size={13}/>恢复选中区域</button>
     </> : null}
   </>;
 }
 
-function LayoutSection({ templateId, onApplyTemplate, layout, setLayout, warp, setWarp }) {
-  return <Section number="02" title="版式">
+function TemplateSection({ templateId, onApplyTemplate, layout, setLayout }) {
+  return <Section number="02" title="海报模板">
     <div className="subhead">海报模板</div>
     <TemplateStrip selected={templateId} onApply={onApplyTemplate}/>
     <div className="subhead">画布辅助</div>
     <div className="toggle-grid"><Toggle label="网格参考线" checked={layout.showGrid} onChange={showGrid=>setLayout(current=>({...current,showGrid}))}/><Toggle label="安全边距" checked={layout.showSafe} onChange={showSafe=>setLayout(current=>({...current,showSafe}))}/></div>
     <RangeRow label="安全边距" value={layout.safeMargin} min={2} max={15} unit="%" onChange={safeMargin=>setLayout(current=>({...current,safeMargin}))}/>
-    <div className="subhead">局部特效</div>
-    <WarpControls warp={warp} setWarp={setWarp}/>
   </Section>;
+}
+
+function WarpSection({ warp, setWarp }) {
+  return <Section number="03" title="局部变形"><p className="panel-intro">选择画布格子，再应用效果</p><WarpControls warp={warp} setWarp={setWarp}/></Section>;
 }
 
 function ShapePicker({ value, onChange }) {
@@ -389,8 +415,10 @@ function CanvasArt({ phase, settings, source, toggles, contourText, colors, tile
 function App() {
   const imageInputRef = useRef(null);
   const fontInputRef = useRef(null);
+  const sidebarRef = useRef(null);
   const [sources,setSources] = useState([]);
   const [selected,setSelected] = useState(null);
+  const [activePanel,setActivePanel] = useState('materials');
   const [templateId,setTemplateId] = useState('editorial');
   const [phase,setPhase] = useState(0);
   const [contourText,setContourText] = useState('FORM FOLLOWS FEELING');
@@ -429,6 +457,7 @@ function App() {
       setSources(current=>[...current,...next]);
       setSelected(next[0].id);
       setLayout(current=>({...current,imageScale:100,imageX:0,imageY:0}));
+      setActivePanel('templates');
       showToast(`已导入 ${next.length} 张图片`);
     } catch {
       showToast('图片读取失败，请更换文件');
@@ -448,6 +477,7 @@ function App() {
     setPhase(template.phase);
     setTypography(current=>({...current,...template.typography}));
     setWarp(current=>({...current,...template.warp,cells:{},selected:0}));
+    if (template.warp.enabled) setActivePanel('warp');
   };
   const uploadFont = async event => {
     const file = event.target.files?.[0];
@@ -515,16 +545,23 @@ function App() {
     image.src = svgUrl;
   };
 
+  const activeCell = warp.cells[warp.selected] || DEFAULT_CELL;
+  const activeTechEffect = TECH_EFFECTS.find(effect=>effect.id === activeCell.effect);
+  useEffect(() => {
+    if (sidebarRef.current) sidebarRef.current.scrollTop = 0;
+  }, [activePanel]);
+
   return <div className="app-shell">
     <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={importImages}/>
     <input ref={fontInputRef} type="file" accept=".ttf,.otf,font/ttf,font/otf" hidden onChange={uploadFont}/>
     <Topbar onImport={()=>imageInputRef.current?.click()} onExport={exportPoster} format={format} setFormat={setFormat} exportScale={exportScale} setExportScale={setExportScale}/>
-    <aside className="control-sidebar">
-      <SourceSection sources={sources} selected={selected} onSelect={setSelected} onImport={()=>imageInputRef.current?.click()} onRemove={removeSource} layout={layout} setLayout={setLayout}/>
-      <LayoutSection templateId={templateId} onApplyTemplate={applyTemplate} layout={layout} setLayout={setLayout} warp={warp} setWarp={setWarp}/>
-      <ContourSection contourText={contourText} setContourText={setContourText} settings={settings} setSettings={setSettings} toggles={toggles} setToggles={setToggles} phase={phase} setPhase={setPhase} tileShape={tileShape} setTileShape={setTileShape} hollow={hollow} setHollow={setHollow} colors={colors} setColors={setColors}/>
-      <TypographySection typography={typography} setTypography={setTypography} onUploadFont={()=>fontInputRef.current?.click()} customFontName={customFontName} colors={colors} setColors={setColors}/>
-      <section className="inspector-section export-options"><div className="section-body"><label className="color-field"><span>画布背景</span><input type="color" value={colors.background} onChange={event=>setColors(current=>({...current,background:event.target.value}))}/><code>{colors.background}</code></label><Toggle label="透明底色" checked={transparent} onChange={setTransparent}/></div></section>
+    <ToolRail active={activePanel} onChange={setActivePanel}/>
+    <aside ref={sidebarRef} className="control-sidebar">
+      {activePanel === 'materials' ? <SourceSection sources={sources} selected={selected} onSelect={setSelected} onImport={()=>imageInputRef.current?.click()} onRemove={removeSource} layout={layout} setLayout={setLayout}/> : null}
+      {activePanel === 'templates' ? <><TemplateSection templateId={templateId} onApplyTemplate={applyTemplate} layout={layout} setLayout={setLayout}/><section className="inspector-section export-options"><div className="section-body"><label className="color-field"><span>画布背景</span><input type="color" value={colors.background} onChange={event=>setColors(current=>({...current,background:event.target.value}))}/><code>{colors.background}</code></label><Toggle label="透明底色" checked={transparent} onChange={setTransparent}/></div></section></> : null}
+      {activePanel === 'warp' ? <WarpSection warp={warp} setWarp={setWarp}/> : null}
+      {activePanel === 'contour' ? <ContourSection contourText={contourText} setContourText={setContourText} settings={settings} setSettings={setSettings} toggles={toggles} setToggles={setToggles} phase={phase} setPhase={setPhase} tileShape={tileShape} setTileShape={setTileShape} hollow={hollow} setHollow={setHollow} colors={colors} setColors={setColors}/> : null}
+      {activePanel === 'type' ? <TypographySection typography={typography} setTypography={setTypography} onUploadFont={()=>fontInputRef.current?.click()} customFontName={customFontName} colors={colors} setColors={setColors}/> : null}
     </aside>
     <main className="workspace">
       <div className="canvas-toolbar">
@@ -536,6 +573,7 @@ function App() {
         <button onClick={()=>setZoom(value=>Math.max(30,value - 8))}><Icon name="minus"/></button><output>{zoom}%</output><button onClick={()=>setZoom(value=>Math.min(130,value + 8))}><Icon name="plus"/></button>
       </div>
       <div className="canvas-viewport"><div className="canvas-sheet" style={{transform:`scale(${zoom / 100})`,aspectRatio:`${canvasSize.width}/${canvasSize.height}`}}><CanvasArt phase={phase} settings={settings} source={activeSource} toggles={toggles} contourText={contourText} colors={colors} tileShape={tileShape} hollow={hollow} canvasWidth={canvasSize.width} canvasHeight={canvasSize.height} layout={layout} setLayout={setLayout} warp={warp} setWarp={setWarp} typography={typography}/></div></div>
+      <div className="workspace-status"><span>{warp.enabled ? `区域 ${String(warp.selected + 1).padStart(2,'0')} · ${activeTechEffect?.name || '未应用特效'} · ${activeCell.intensity}%` : '就绪 · 选择左侧工具开始编辑'}</span><span>自动保存于本机</span></div>
     </main>
     {toast ? <div className="toast">{toast}</div> : null}
   </div>;
