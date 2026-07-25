@@ -1,17 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { fileToDataUrl, imageDimensions, useContourAnalysis } from './contour';
 import './styles.css';
 
-const phases = [
-  { name: '轮廓', radius: 8 },
+const DEFAULT_CANVAS = { width: 1080, height: 1350 };
+const DEFAULT_CELL = { x: 0, y: 0, scaleX: 100, scaleY: 100, skew: 0, blur: 0 };
+const PHASES = [
+  { name: '贴合', radius: 8 },
   { name: '圆化', radius: 72 },
-  { name: '粒子', radius: 50 },
+  { name: '散点', radius: 50 },
   { name: '网格', radius: 6 },
-  { name: '回吸', radius: 36 },
 ];
-
-const DEFAULT_CANVAS = { width: 800, height: 1000 };
-const MAX_ANALYSIS_EDGE = 560;
 const CANVAS_PRESETS = [
   { value: 'original', label: '原图尺寸' },
   { value: 'square', label: '1:1 · 1080 × 1080', width: 1080, height: 1080 },
@@ -19,391 +18,469 @@ const CANVAS_PRESETS = [
   { value: 'social', label: '4:5 · 1080 × 1350', width: 1080, height: 1350 },
   { value: 'story', label: '9:16 · 1080 × 1920', width: 1080, height: 1920 },
   { value: 'landscape', label: '16:9 · 1920 × 1080', width: 1920, height: 1080 },
+  { value: 'a4', label: 'A4 · 2480 × 3508', width: 2480, height: 3508 },
+  { value: 'a3', label: 'A3 · 3508 × 4961', width: 3508, height: 4961 },
+];
+const TEMPLATES = [
+  {
+    id: 'editorial', name: '形随感知', note: '黑白编辑',
+    colors: { background: '#080808', subject: '#2457ff', tile: '#ffffff', tileBorder: '#ffffff', text: '#080808', posterText: '#ffffff' },
+    tileShape: 'square', hollow: false, phase: 0,
+    typography: { title: '形随感知', subtitle: 'FORM FOLLOWS FEELING', info: '2026.07.25 — 08.30\nBEIJING · ART DISTRICT', placement: 'top-left', titleSize: 92 },
+    warp: { enabled: false },
+  },
+  {
+    id: 'boundary', name: '边界之外', note: '空心轮廓',
+    colors: { background: '#f4f4f4', subject: '#101010', tile: '#101010', tileBorder: '#101010', text: '#ffffff', posterText: '#101010' },
+    tileShape: 'circle', hollow: true, phase: 1,
+    typography: { title: '边界之外', subtitle: 'BEYOND THE BOUNDARY', info: 'VISUAL RESEARCH\nNO. 02 / 2026', placement: 'top-left', titleSize: 82 },
+    warp: { enabled: false },
+  },
+  {
+    id: 'deform', name: '局部形变', note: '网格压扁',
+    colors: { background: '#ffffff', subject: '#2457ff', tile: '#ffffff', tileBorder: '#111111', text: '#111111', posterText: '#111111' },
+    tileShape: 'square', hollow: true, phase: 0,
+    typography: { title: '形态实验', subtitle: 'LOCAL DEFORMATION STUDY', info: 'GRID 06 × 08\nPOSTER SERIES', placement: 'top-left', titleSize: 88 },
+    warp: { enabled: true, columns: 6, rows: 8 },
+  },
+  {
+    id: 'signal', name: '蓝色信号', note: '钴蓝强调',
+    colors: { background: '#2457ff', subject: '#080808', tile: '#ffffff', tileBorder: '#080808', text: '#080808', posterText: '#ffffff' },
+    tileShape: 'triangle', hollow: false, phase: 2,
+    typography: { title: '视觉信号', subtitle: 'SIGNAL / SHAPE / TYPE', info: '2026 DESIGN WEEK\nSHANGHAI', placement: 'bottom-left', titleSize: 86 },
+    warp: { enabled: false },
+  },
 ];
 
-function imageDimensions(url) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
-    image.onerror = reject;
-    image.src = url;
-  });
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function buildContourAnalysis(image, settings) {
-  const scale = Math.min(1, MAX_ANALYSIS_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
-  const width = Math.max(1, Math.round(image.naturalWidth * scale));
-  const height = Math.max(1, Math.round(image.naturalHeight * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  context.filter = `blur(${(settings.smooth / 100) * 2.2}px)`;
-  context.drawImage(image, 0, 0, width, height);
-  context.filter = 'none';
-
-  const pixels = context.getImageData(0, 0, width, height);
-  const mask = new Uint8Array(width * height);
-  const threshold = settings.threshold;
-  for (let index = 0; index < mask.length; index += 1) {
-    const offset = index * 4;
-    const alpha = pixels.data[offset + 3] / 255;
-    const luminance = pixels.data[offset] * 0.299 + pixels.data[offset + 1] * 0.587 + pixels.data[offset + 2] * 0.114;
-    const foreground = settings.invert ? luminance >= threshold : luminance <= threshold;
-    mask[index] = alpha > 0.08 && foreground ? 1 : 0;
-  }
-
-  const visited = new Uint8Array(mask.length);
-  const components = [];
-  const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-  for (let start = 0; start < mask.length; start += 1) {
-    if (!mask[start] || visited[start]) continue;
-    const queue = [start];
-    const component = [];
-    visited[start] = 1;
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
-      const point = queue[cursor];
-      component.push(point);
-      const x = point % width;
-      const y = Math.floor(point / width);
-      for (const [dx, dy] of neighbors) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-        const next = ny * width + nx;
-        if (mask[next] && !visited[next]) {
-          visited[next] = 1;
-          queue.push(next);
-        }
-      }
-    }
-    components.push(component);
-  }
-
-  components.sort((a, b) => b.length - a.length);
-  const sourceToAnalysisArea = (width * height) / (image.naturalWidth * image.naturalHeight);
-  const minimumArea = Math.max(2, settings.area * sourceToAnalysisArea);
-  const retained = components.filter((component, index) => index === 0 || component.length >= minimumArea);
-  mask.fill(0);
-  retained.forEach(component => component.forEach(index => { mask[index] = 1; }));
-
-  const exterior = new Uint8Array(mask.length);
-  const exteriorQueue = [];
-  const enqueueExterior = (x, y) => {
-    const index = y * width + x;
-    if (!mask[index] && !exterior[index]) {
-      exterior[index] = 1;
-      exteriorQueue.push(index);
-    }
-  };
-  for (let x = 0; x < width; x += 1) { enqueueExterior(x, 0); enqueueExterior(x, height - 1); }
-  for (let y = 0; y < height; y += 1) { enqueueExterior(0, y); enqueueExterior(width - 1, y); }
-  for (let cursor = 0; cursor < exteriorQueue.length; cursor += 1) {
-    const point = exteriorQueue[cursor];
-    const x = point % width;
-    const y = Math.floor(point / width);
-    for (const [dx, dy] of neighbors) {
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) enqueueExterior(nx, ny);
-    }
-  }
-
-  const edge = [];
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (!mask[index]) continue;
-      const adjacent = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]
-        .filter(([nx, ny]) => nx < 0 || nx >= width || ny < 0 || ny >= height || !mask[ny * width + nx]);
-      if (adjacent.length) {
-        const inner = adjacent.every(([nx, ny]) => nx >= 0 && nx < width && ny >= 0 && ny < height && !exterior[ny * width + nx]);
-        edge.push({ x, y, inner });
-      }
-    }
-  }
-
-  const step = Math.max(1, Math.ceil(edge.length / 1400));
-  const sampledEdge = edge.filter((_, index) => index % step === 0);
-
-  const maskCanvas = document.createElement('canvas');
-  maskCanvas.width = width;
-  maskCanvas.height = height;
-  const maskContext = maskCanvas.getContext('2d');
-  const maskPixels = maskContext.createImageData(width, height);
-  for (let index = 0; index < mask.length; index += 1) {
-    if (!mask[index]) continue;
-    const offset = index * 4;
-    maskPixels.data[offset] = 11;
-    maskPixels.data[offset + 1] = 12;
-    maskPixels.data[offset + 2] = 12;
-    maskPixels.data[offset + 3] = 255;
-  }
-  maskContext.putImageData(maskPixels, 0, 0);
-
-  return { width, height, maskUrl: maskCanvas.toDataURL('image/png'), edge: sampledEdge };
-}
-
-function useContourAnalysis(source, settings) {
-  const [analysis, setAnalysis] = useState(null);
-  useEffect(() => {
-    if (!source?.url) {
-      setAnalysis(null);
-      return undefined;
-    }
-    let cancelled = false;
-    const image = new Image();
-    image.onload = () => {
-      if (!cancelled) setAnalysis(buildContourAnalysis(image, settings));
-    };
-    image.src = source.url;
-    return () => { cancelled = true; };
-  }, [source?.url, settings.threshold, settings.smooth, settings.area, settings.invert]);
-  return analysis;
-}
-
-const Icon = ({ name, size = 18 }) => {
+function Icon({ name, size = 18 }) {
   const paths = {
     upload: <><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 14v5h14v-5"/></>,
     export: <><path d="M12 15V3M7 10l5 5 5-5"/><path d="M5 17v4h14v-4"/></>,
-    plus: <path d="M12 5v14M5 12h14"/>, undo: <path d="M9 7 4 12l5 5M5 12h8a6 6 0 0 1 6 6"/>,
-    redo: <path d="m15 7 5 5-5 5M19 12h-8a6 6 0 0 0-6 6"/>, trash: <><path d="M4 7h16M9 3h6l1 4H8l1-4M7 7l1 14h8l1-14"/></>,
-    help: <><circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.4 2.4 0 1 1 3.2 2.3c-.7.3-.9.8-.9 1.7M12 17h.01"/></>,
-    eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></>,
-    image: <><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 2-2 5 4"/></>,
-    layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></>,
-    zoomIn: <><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M10 7v6M7 10h6"/></>,
-    zoomOut: <><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M7 10h6"/></>,
-    chevron: <path d="m9 6 6 6-6 6"/>,
+    plus: <path d="M12 5v14M5 12h14"/>,
+    minus: <path d="M5 12h14"/>,
+    grid: <><path d="M4 4h16v16H4zM4 9h16M4 15h16M9 4v16M15 4v16"/></>,
+    frame: <path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/>,
+    reset: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.6"/><path d="M4 4v4.6h4.6"/></>,
   };
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
-};
-
-function Button({ children, icon, primary = false, onClick, className = '' }) {
-  return <button className={`button ${primary ? 'primary' : ''} ${className}`} onClick={onClick}>{icon ? <Icon name={icon}/> : null}<span>{children}</span></button>;
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
-function Topbar({ onImport, onExport, format, setFormat }) {
+function Button({ children, icon, primary, onClick, className = '', disabled = false }) {
+  return <button className={`button ${primary ? 'primary' : ''} ${className}`} onClick={onClick} disabled={disabled}>{icon ? <Icon name={icon}/> : null}<span>{children}</span></button>;
+}
+
+function Topbar({ onImport, onExport, format, setFormat, exportScale, setExportScale }) {
   return <header className="topbar">
-    <div className="brand"><strong>轮廓文字</strong><span>POSTER CONTOUR LAB</span></div>
+    <div className="brand"><strong>轮廓文字</strong><span>专业静态海报编辑器</span></div>
     <div className="utilities">
-      <Button icon="upload" onClick={onImport}>导入图片</Button>
+      <Button icon="upload" onClick={onImport}>导入素材</Button>
       <select aria-label="导出格式" value={format} onChange={event=>setFormat(event.target.value)}><option>PNG</option><option>SVG</option></select>
+      <select aria-label="导出质量" value={exportScale} onChange={event=>setExportScale(Number(event.target.value))} disabled={format === 'SVG'}><option value={1}>1×</option><option value={2}>2× 高清</option></select>
       <Button icon="export" primary onClick={onExport}>导出海报</Button>
     </div>
   </header>;
 }
 
-function SourcePanel({ sources, selected, onSelect, onImport, onRemove }) {
-  return <div className="left-panel">
-    <div className="panel-title"><span><b>01</b> 素材</span><small>{sources.length} / 5</small></div>
+function Section({ number, title, children }) {
+  return <section className="inspector-section"><h3><b>{number}</b>{title}</h3><div className="section-body">{children}</div></section>;
+}
+
+function RangeRow({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  return <label className="control-row"><span>{label}</span><input type="range" min={min} max={max} step={step} value={value} onChange={event=>onChange(Number(event.target.value))}/><output>{value}{unit}</output></label>;
+}
+
+function Toggle({ label, checked, onChange }) {
+  return <label className="toggle-row"><span>{label}</span><input type="checkbox" checked={checked} onChange={event=>onChange(event.target.checked)}/><i/></label>;
+}
+
+function Field({ label, value, onChange, multiline = false }) {
+  return <label className="field-row"><span>{label}</span>{multiline ? <textarea value={value} onChange={event=>onChange(event.target.value)}/> : <input value={value} onChange={event=>onChange(event.target.value)}/>}</label>;
+}
+
+function SourceSection({ sources, selected, onSelect, onImport, onRemove, layout, setLayout }) {
+  return <Section number="01" title="素材">
     <div className="source-list">
-      {sources.map((s, idx) => <button key={s.id} className={`source-item ${selected === s.id ? 'selected' : ''}`} onClick={() => onSelect(s.id)}>
-        <span className="source-index">{idx + 1}</span>
-        <img src={s.url} alt={s.name}/>
-        <span className="source-name">{s.name}</span>
-        <span className="remove" role="button" onClick={(e)=>{e.stopPropagation();onRemove(s.id)}}>×</span>
+      {sources.map((source, index)=><button key={source.id} className={`source-item ${selected === source.id ? 'selected' : ''}`} onClick={()=>onSelect(source.id)}>
+        <span>{index + 1}</span><img src={source.url} alt={source.name}/><i role="button" onClick={event=>{event.stopPropagation();onRemove(source.id)}}>×</i>
       </button>)}
-      {sources.length < 5 ? <button className="dropzone" onClick={onImport}><Icon name="plus"/><strong>添加图片</strong><small>PNG / JPG / WEBP</small></button> : null}
+      {sources.length < 5 ? <button className="source-add" onClick={onImport}><Icon name="plus"/><small>添加图片</small></button> : null}
     </div>
-    <p className="source-help">支持 1–5 张，画布可用原图或常用尺寸。</p>
+    <div className="subhead">裁切与构图</div>
+    <RangeRow label="图片缩放" value={layout.imageScale} min={100} max={220} unit="%" onChange={value=>setLayout(current=>({...current,imageScale:value}))}/>
+    <RangeRow label="水平位置" value={layout.imageX} min={-60} max={60} unit="%" onChange={value=>setLayout(current=>({...current,imageX:value}))}/>
+    <RangeRow label="垂直位置" value={layout.imageY} min={-60} max={60} unit="%" onChange={value=>setLayout(current=>({...current,imageY:value}))}/>
+    <button className="line-button" onClick={()=>setLayout(current=>({...current,imageScale:100,imageX:0,imageY:0}))}><Icon name="reset" size={14}/>重置图片位置</button>
+    <p className="microcopy">未启用局部网格时，也可以直接拖动画布中的原图。</p>
+  </Section>;
+}
+
+function TemplateStrip({ selected, onApply }) {
+  return <div className="template-strip">{TEMPLATES.map(template=><button key={template.id} className={`template-card ${selected === template.id ? 'active' : ''}`} onClick={()=>onApply(template)} style={{'--t-bg':template.colors.background,'--t-fg':template.colors.posterText,'--t-accent':template.colors.subject}}>
+    <span className="template-title">{template.name}</span><span className="template-art"><i/><i/><i/></span><small>{template.note}</small>
+  </button>)}</div>;
+}
+
+function WarpControls({ warp, setWarp }) {
+  const cell = warp.cells[warp.selected] || DEFAULT_CELL;
+  const updateCell = (field, value) => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...current.cells[current.selected],[field]:value}}}));
+  const applyPreset = preset => setWarp(current=>({...current,cells:{...current.cells,[current.selected]:{...DEFAULT_CELL,...preset}}}));
+  return <>
+    <div className="warp-heading"><Toggle label="局部网格变形" checked={warp.enabled} onChange={enabled=>setWarp(current=>({...current,enabled}))}/><small>{warp.columns} × {warp.rows}</small></div>
+    {warp.enabled ? <>
+      <RangeRow label="横向格数" value={warp.columns} min={2} max={12} onChange={columns=>setWarp(current=>({...current,columns,selected:0,cells:{}}))}/>
+      <RangeRow label="纵向格数" value={warp.rows} min={2} max={16} onChange={rows=>setWarp(current=>({...current,rows,selected:0,cells:{}}))}/>
+      <div className="selected-cell">选中区域 <b>{String(warp.selected + 1).padStart(2, '0')}</b></div>
+      <RangeRow label="X 位移" value={cell.x} min={-120} max={120} unit=" px" onChange={value=>updateCell('x',value)}/>
+      <RangeRow label="Y 位移" value={cell.y} min={-120} max={120} unit=" px" onChange={value=>updateCell('y',value)}/>
+      <RangeRow label="横向拉伸" value={cell.scaleX} min={40} max={220} unit="%" onChange={value=>updateCell('scaleX',value)}/>
+      <RangeRow label="纵向压缩" value={cell.scaleY} min={20} max={180} unit="%" onChange={value=>updateCell('scaleY',value)}/>
+      <RangeRow label="倾斜" value={cell.skew} min={-40} max={40} unit="°" onChange={value=>updateCell('skew',value)}/>
+      <RangeRow label="模糊" value={cell.blur} min={0} max={18} unit=" px" onChange={value=>updateCell('blur',value)}/>
+      <div className="warp-presets">
+        <button onClick={()=>applyPreset({scaleX:165})}>横向拉伸</button>
+        <button onClick={()=>applyPreset({scaleY:42})}>纵向压扁</button>
+        <button onClick={()=>applyPreset({blur:8})}>柔焦</button>
+        <button onClick={()=>applyPreset(DEFAULT_CELL)}>重置区域</button>
+      </div>
+    </> : null}
+  </>;
+}
+
+function LayoutSection({ templateId, onApplyTemplate, layout, setLayout, warp, setWarp }) {
+  return <Section number="02" title="版式">
+    <div className="subhead">海报模板</div>
+    <TemplateStrip selected={templateId} onApply={onApplyTemplate}/>
+    <div className="subhead">画布辅助</div>
+    <div className="toggle-grid"><Toggle label="网格参考线" checked={layout.showGrid} onChange={showGrid=>setLayout(current=>({...current,showGrid}))}/><Toggle label="安全边距" checked={layout.showSafe} onChange={showSafe=>setLayout(current=>({...current,showSafe}))}/></div>
+    <RangeRow label="安全边距" value={layout.safeMargin} min={2} max={15} unit="%" onChange={safeMargin=>setLayout(current=>({...current,safeMargin}))}/>
+    <div className="subhead">局部特效</div>
+    <WarpControls warp={warp} setWarp={setWarp}/>
+  </Section>;
+}
+
+function ShapePicker({ value, onChange }) {
+  return <div className="shape-picker">
+    <button aria-label="正方形" className={value === 'square' ? 'active' : ''} onClick={()=>onChange('square')}><i className="square"/></button>
+    <button aria-label="圆形" className={value === 'circle' ? 'active' : ''} onClick={()=>onChange('circle')}><i className="circle"/></button>
+    <button aria-label="三角形" className={value === 'triangle' ? 'active' : ''} onClick={()=>onChange('triangle')}><i className="triangle"/></button>
   </div>;
+}
+
+function ContourSection({ contourText, setContourText, settings, setSettings, toggles, setToggles, phase, setPhase, tileShape, setTileShape, hollow, setHollow, colors, setColors }) {
+  const set = (field, value) => setSettings(current=>({...current,[field]:value}));
+  const setColor = (field, value) => setColors(current=>({...current,[field]:value}));
+  return <Section number="03" title="轮廓">
+    <Field label="轮廓文字" value={contourText} onChange={setContourText}/>
+    <RangeRow label="明暗阈值" value={settings.threshold} max={255} onChange={value=>set('threshold',value)}/>
+    <RangeRow label="轮廓平滑" value={settings.smooth} onChange={value=>set('smooth',value)}/>
+    <RangeRow label="最小面积" value={settings.area} max={800} unit=" px²" onChange={value=>set('area',value)}/>
+    <div className="toggle-grid">
+      <Toggle label="反转前景" checked={settings.invert} onChange={value=>set('invert',value)}/>
+      <Toggle label="显示主体" checked={toggles.shape} onChange={shape=>setToggles(current=>({...current,shape}))}/>
+      <Toggle label="外轮廓文字" checked={toggles.text} onChange={text=>setToggles(current=>({...current,text}))}/>
+      <Toggle label="孔洞文字" checked={toggles.innerText} onChange={innerText=>setToggles(current=>({...current,innerText}))}/>
+    </div>
+    <div className="subhead">轮廓样式</div>
+    <div className="phase-tabs">{PHASES.map((item,index)=><button key={item.name} className={phase === index ? 'active' : ''} onClick={()=>setPhase(index)}>{item.name}</button>)}</div>
+    <label className="inline-control"><span>文字底形</span><ShapePicker value={tileShape} onChange={setTileShape}/></label>
+    <Toggle label="空心形状" checked={hollow} onChange={setHollow}/>
+    <RangeRow label="文字大小" value={settings.size} min={4} max={60} unit=" px" onChange={value=>set('size',value)}/>
+    <RangeRow label="文字密度" value={settings.density} unit="%" onChange={value=>set('density',value)}/>
+    <RangeRow label="扩散程度" value={settings.spread} unit="%" onChange={value=>set('spread',value)}/>
+    <div className="color-row">
+      <label>形状<input type="color" value={colors.tile} onChange={event=>setColor('tile',event.target.value)}/></label>
+      <label>形内字<input type="color" value={colors.text} onChange={event=>setColor('text',event.target.value)}/></label>
+      <label>主体<input type="color" value={colors.subject} onChange={event=>setColor('subject',event.target.value)}/></label>
+    </div>
+  </Section>;
+}
+
+function TypographySection({ typography, setTypography, onUploadFont, customFontName, colors, setColors }) {
+  const set = (field, value) => setTypography(current=>({...current,[field]:value}));
+  return <Section number="04" title="文字">
+    <Field label="主标题" value={typography.title} onChange={value=>set('title',value)}/>
+    <Field label="副标题" value={typography.subtitle} onChange={value=>set('subtitle',value)}/>
+    <Field label="信息文字" value={typography.info} onChange={value=>set('info',value)} multiline/>
+    <label className="field-row"><span>标题位置</span><select value={typography.placement} onChange={event=>set('placement',event.target.value)}><option value="top-left">左上</option><option value="top-center">顶部居中</option><option value="bottom-left">左下</option></select></label>
+    <RangeRow label="标题大小" value={typography.titleSize} min={48} max={150} onChange={value=>set('titleSize',value)}/>
+    <label className="field-row"><span>字体</span><select value={typography.fontFamily} onChange={event=>set('fontFamily',event.target.value)}><option value="Noto Sans SC">无衬线黑体</option><option value="IBM Plex Mono">等宽字体</option>{customFontName ? <option value={customFontName}>{customFontName}</option> : null}</select></label>
+    <button className="line-button" onClick={onUploadFont}>上传 TTF / OTF 字体</button>
+    <label className="color-field"><span>海报文字颜色</span><input type="color" value={colors.posterText} onChange={event=>setColors(current=>({...current,posterText:event.target.value}))}/><code>{colors.posterText}</code></label>
+  </Section>;
 }
 
 function ContourTile({ shape, hollow, size, radius, colors, strokeWidth, character, rotation }) {
   const fill = hollow ? 'none' : colors.tile;
   const stroke = hollow ? colors.tile : colors.tileBorder;
   const textColor = hollow ? colors.tile : colors.text;
-  const common = { fill, stroke, strokeWidth };
-  return <g>
-    {shape === 'circle' ? <circle r={size} {...common}/> : shape === 'triangle' ? <path d={`M0 ${-size * 1.16} L${size * 1.08} ${size * .88} L${-size * 1.08} ${size * .88} Z`} {...common}/> : <rect x={-size} y={-size} width={size * 2} height={size * 2} rx={radius} {...common}/>}
-    <text fill={textColor} fontSize={size * 1.12} fontWeight="700" textAnchor="middle" dominantBaseline="central" transform={`translate(0 ${shape === 'triangle' ? size * .12 : 0}) rotate(${-rotation})`}>{character}</text>
+  return <g>{shape === 'circle' ? <circle r={size} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/> : shape === 'triangle' ? <path d={`M0 ${-size * 1.16} L${size * 1.08} ${size * .88} L${-size * 1.08} ${size * .88} Z`} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/> : <rect x={-size} y={-size} width={size * 2} height={size * 2} rx={radius} fill={fill} stroke={stroke} strokeWidth={strokeWidth}/>}<text fill={textColor} fontSize={size * 1.12} fontWeight="700" textAnchor="middle" dominantBaseline="central" transform={`translate(0 ${shape === 'triangle' ? size * .12 : 0}) rotate(${-rotation})`}>{character}</text></g>;
+}
+
+function LocalWarpLayer({ canvasWidth, canvasHeight, warp, onSelect }) {
+  const cellWidth = canvasWidth / warp.columns;
+  const cellHeight = canvasHeight / warp.rows;
+  const cells = Array.from({ length: warp.columns * warp.rows }, (_, index) => index);
+  return <>
+    <defs>{cells.map(index=>{
+      const column = index % warp.columns;
+      const row = Math.floor(index / warp.columns);
+      const cell = warp.cells[index] || DEFAULT_CELL;
+      return <React.Fragment key={index}><clipPath id={`warp-clip-${index}`}><rect x={column * cellWidth} y={row * cellHeight} width={cellWidth + .5} height={cellHeight + .5}/></clipPath>{cell.blur > 0 ? <filter id={`warp-blur-${index}`} x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation={cell.blur}/></filter> : null}</React.Fragment>;
+    })}</defs>
+    <g className="local-warp-layer">{cells.map(index=>{
+      const column = index % warp.columns;
+      const row = Math.floor(index / warp.columns);
+      const cell = warp.cells[index] || DEFAULT_CELL;
+      const centerX = (column + .5) * cellWidth;
+      const centerY = (row + .5) * cellHeight;
+      const transform = `translate(${centerX + cell.x} ${centerY + cell.y}) skewX(${cell.skew}) scale(${cell.scaleX / 100} ${cell.scaleY / 100}) translate(${-centerX} ${-centerY})`;
+      return <g key={index} clipPath={`url(#warp-clip-${index})`}><g transform={transform} filter={cell.blur > 0 ? `url(#warp-blur-${index})` : undefined}><use href="#source-master"/></g></g>;
+    })}</g>
+    <g className="editor-only warp-selectors">{cells.map(index=>{
+      const column = index % warp.columns;
+      const row = Math.floor(index / warp.columns);
+      return <rect key={index} x={column * cellWidth} y={row * cellHeight} width={cellWidth} height={cellHeight} className={index === warp.selected ? 'selected' : ''} onPointerDown={event=>{event.stopPropagation();onSelect(index)}}/>;
+    })}</g>
+  </>;
+}
+
+function PosterTypography({ canvasWidth, canvasHeight, typography, colors, safeMargin }) {
+  const margin = Math.min(canvasWidth, canvasHeight) * safeMargin / 100;
+  const titleSize = Math.min(canvasWidth, canvasHeight) * typography.titleSize / 1000;
+  const subtitleSize = titleSize * .24;
+  const infoSize = Math.max(12, titleSize * .18);
+  const centered = typography.placement === 'top-center';
+  const bottom = typography.placement === 'bottom-left';
+  const x = centered ? canvasWidth / 2 : margin;
+  const anchor = centered ? 'middle' : 'start';
+  const titleY = bottom ? canvasHeight - margin - titleSize * 1.65 : margin + titleSize;
+  const subtitleY = titleY + titleSize * .46;
+  const infoLines = typography.info.split('\n').slice(0, 4);
+  const infoY = bottom ? margin + infoSize : canvasHeight - margin - infoSize * Math.max(0, infoLines.length - 1);
+  return <g className="poster-typography" fill={colors.posterText} fontFamily={`${typography.fontFamily}, "Noto Sans SC", sans-serif`}>
+    <text x={x} y={titleY} textAnchor={anchor} fontSize={titleSize} fontWeight="800" letterSpacing={-titleSize * .035}>{typography.title}</text>
+    <text x={x} y={subtitleY} textAnchor={anchor} fontSize={subtitleSize} fontWeight="600" letterSpacing={subtitleSize * .05}>{typography.subtitle}</text>
+    <text x={margin} y={infoY} fontSize={infoSize} fontWeight="500">{infoLines.map((line,index)=><tspan key={index} x={margin} dy={index === 0 ? 0 : infoSize * 1.35}>{line}</tspan>)}</text>
   </g>;
 }
 
-function CanvasArt({ phase, settings, source, toggles, customText, colors, tileShape, hollowTiles, canvasWidth, canvasHeight }) {
+function CanvasArt({ phase, settings, source, toggles, contourText, colors, tileShape, hollow, canvasWidth, canvasHeight, layout, setLayout, warp, setWarp, typography }) {
   const analysis = useContourAnalysis(source, settings);
-  const words = (customText || 'FORM FOLLOWS FEELING').toUpperCase();
-  const hasImportedImage = Boolean(source?.url);
+  const dragRef = useRef(null);
+  const hasSource = Boolean(source?.url);
   const minimumSide = Math.min(canvasWidth, canvasHeight);
   const sourceWidth = source?.width || canvasWidth;
   const sourceHeight = source?.height || canvasHeight;
-  const coverScale = Math.max(canvasWidth / sourceWidth, canvasHeight / sourceHeight);
+  const coverScale = Math.max(canvasWidth / sourceWidth, canvasHeight / sourceHeight) * layout.imageScale / 100;
   const fittedWidth = sourceWidth * coverScale;
   const fittedHeight = sourceHeight * coverScale;
-  const imageX = (canvasWidth - fittedWidth) / 2;
-  const imageY = (canvasHeight - fittedHeight) / 2;
+  const imageX = (canvasWidth - fittedWidth) / 2 + canvasWidth * layout.imageX / 100;
+  const imageY = (canvasHeight - fittedHeight) / 2 + canvasHeight * layout.imageY / 100;
+  const words = (contourText || 'FORM FOLLOWS FEELING').toUpperCase();
   const edgeElements = useMemo(() => {
     if (!analysis?.edge.length) return [];
     const targetCount = Math.max(40, Math.round(60 + settings.density * 3.2));
     const step = Math.max(1, Math.ceil(analysis.edge.length / targetCount));
-    const scaleX = fittedWidth / analysis.width;
-    const scaleY = fittedHeight / analysis.height;
-    return analysis.edge.filter((_, index) => index % step === 0).map((point, index) => ({
-      x: imageX + point.x * scaleX,
-      y: imageY + point.y * scaleY,
+    return analysis.edge.filter((_, index)=>index % step === 0).map((point,index)=>({
+      x: imageX + point.x * fittedWidth / analysis.width,
+      y: imageY + point.y * fittedHeight / analysis.height,
       inner: point.inner,
-      size: Math.max(1.5, minimumSide * (settings.size / 1000) * (0.55 + (index % 5) * 0.12)),
+      size: Math.max(1.5, minimumSide * (settings.size / 1000) * (.55 + (index % 5) * .12)),
       rotation: (index * 29) % 180,
     }));
   }, [analysis, fittedWidth, fittedHeight, imageX, imageY, minimumSide, settings.density, settings.size]);
-  const showMask = phase === 0 || phase === 1 || phase === 4;
-  const scatter = phase === 2 ? 1 + settings.spread / 260 : phase === 3 ? 1.02 : phase === 1 ? 0.99 : 1;
+  const scatter = phase === 2 ? 1 + settings.spread / 260 : phase === 3 ? 1.02 : phase === 1 ? .99 : 1;
   const centerX = canvasWidth / 2;
   const centerY = canvasHeight / 2;
-  const phaseScale = 1;
-  const headingSize = Math.max(9, minimumSide * 0.022);
-  return <svg id="artboard" viewBox={`0 0 ${canvasWidth} ${canvasHeight}`} data-width={canvasWidth} data-height={canvasHeight} role="img" aria-label="轮廓海报画布">
+  const handlePointerDown = event => {
+    if (!hasSource || warp.enabled) return;
+    dragRef.current = { clientX:event.clientX,clientY:event.clientY,imageX:layout.imageX,imageY:layout.imageY };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const handlePointerMove = event => {
+    if (!dragRef.current) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setLayout(current=>({...current,imageX:dragRef.current.imageX + (event.clientX - dragRef.current.clientX) / bounds.width * 100,imageY:dragRef.current.imageY + (event.clientY - dragRef.current.clientY) / bounds.height * 100}));
+  };
+  const stopDrag = () => { dragRef.current = null; };
+  const guideColumns = warp.enabled ? warp.columns : 6;
+  const guideRows = warp.enabled ? warp.rows : 8;
+  const safe = minimumSide * layout.safeMargin / 100;
+  return <svg id="artboard" viewBox={`0 0 ${canvasWidth} ${canvasHeight}`} data-width={canvasWidth} data-height={canvasHeight} role="img" aria-label="海报编辑画布" onPointerMove={handlePointerMove} onPointerUp={stopDrag} onPointerCancel={stopDrag}>
     <rect className="canvas-background" width={canvasWidth} height={canvasHeight} fill={colors.background}/>
-    {hasImportedImage && toggles.original ? <image className="source-background" href={source.url} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none"/> : null}
     <defs>
-      <filter id="roundedContour" x="-10%" y="-10%" width="120%" height="120%">
-        <feGaussianBlur stdDeviation={Math.max(0.4, minimumSide * 0.004 * phases[phase].radius / 100)}/>
-        <feComponentTransfer><feFuncA type="table" tableValues="0 0 1 1"/></feComponentTransfer>
-      </filter>
-      <filter id="colorizeContour" colorInterpolationFilters="sRGB"><feFlood floodColor={colors.subject}/><feComposite in2="SourceAlpha" operator="in"/></filter>
+      {hasSource ? <image id="source-master" href={source.url} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none"/> : null}
+      <filter id="rounded-contour" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation={Math.max(.4, minimumSide * .004 * PHASES[phase].radius / 100)}/><feComponentTransfer><feFuncA type="table" tableValues="0 0 1 1"/></feComponentTransfer></filter>
+      <filter id="colorize-contour" colorInterpolationFilters="sRGB"><feFlood floodColor={colors.subject}/><feComposite in2="SourceAlpha" operator="in"/></filter>
     </defs>
-    {hasImportedImage && !analysis ? <g className="analysis-loading" fill="#fff"><text x={centerX} y={centerY} textAnchor="middle" fontSize={headingSize}>正在识别图片轮廓…</text></g> : null}
-    {hasImportedImage && analysis && toggles.shape && showMask ? <g transform={`translate(${centerX} ${centerY}) scale(${phaseScale}) translate(${-centerX} ${-centerY})`} filter={phase === 1 ? 'url(#roundedContour)' : undefined}><image className={`detected-mask detected-mask-${phase}`} href={analysis.maskUrl} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none" filter="url(#colorizeContour)" opacity={phase === 4 ? 0.88 : 1}/></g> : null}
-    {!hasImportedImage ? <g className="empty-poster" fill="#fff" opacity=".72"><text x={centerX} y={centerY - 8} textAnchor="middle" fontSize={Math.max(16, minimumSide * .026)} fontWeight="600">上传图片开始制作海报</text><text x={centerX} y={centerY + 24} textAnchor="middle" fontSize={Math.max(9, minimumSide * .014)} opacity=".65">可在上方选择常用画布尺寸</text></g> : null}
-    {analysis ? <g className="particles">
-      {edgeElements.map((point, index) => {
-        const textEnabled = point.inner ? toggles.innerText : toggles.text;
-        if (!textEnabled && phase !== 2 && phase !== 3) return null;
-        const looseX = phase === 2 ? Math.sin(index * 2.7) * point.size * settings.spread / 35 : 0;
-        const looseY = phase === 2 ? Math.cos(index * 1.9) * point.size * settings.spread / 35 : 0;
-        return <g key={`${point.x}-${point.y}`} data-contour={point.inner?'inner':'outer'} transform={`translate(${centerX + (point.x - centerX) * scatter * phaseScale + looseX} ${centerY + (point.y - centerY) * scatter * phaseScale + looseY}) rotate(${point.rotation})`}>
-          {textEnabled ? <ContourTile shape={tileShape} hollow={hollowTiles} size={point.size} radius={phase === 1 ? point.size * .45 : phases[phase].radius * point.size / 130} colors={colors} strokeWidth={Math.max(.65, minimumSide * .0011)} character={words[index % words.length] || 'A'} rotation={point.rotation}/> : phase === 3 ? <rect x={-point.size} y={-point.size} width={point.size * 2} height={point.size * 2} fill="none" stroke={colors.tile} strokeWidth={Math.max(0.6, minimumSide * 0.0015)}/> : <circle r={point.size * 0.62} fill={colors.tile}/>} 
-        </g>;
-      })}
-    </g> : null}
+    {hasSource && toggles.original ? warp.enabled ? <LocalWarpLayer canvasWidth={canvasWidth} canvasHeight={canvasHeight} warp={warp} onSelect={selected=>setWarp(current=>({...current,selected}))}/> : <use className="source-background" href="#source-master" onPointerDown={handlePointerDown} style={{cursor:'grab'}}/> : null}
+    {hasSource && analysis && toggles.shape && phase !== 2 && phase !== 3 ? <image className="detected-mask" href={analysis.maskUrl} x={imageX} y={imageY} width={fittedWidth} height={fittedHeight} preserveAspectRatio="none" filter={phase === 1 ? 'url(#rounded-contour)' : 'url(#colorize-contour)'}/> : null}
+    {!hasSource ? <g className="empty-poster" fill={colors.posterText} opacity=".72"><text x={centerX} y={centerY - 10} textAnchor="middle" fontSize={minimumSide * .03} fontWeight="700">导入图片开始制作海报</text><text x={centerX} y={centerY + 28} textAnchor="middle" fontSize={minimumSide * .014} opacity=".66">支持社交媒体与 A3 / A4 印刷尺寸</text></g> : null}
+    {analysis ? <g className="particles">{edgeElements.map((point,index)=>{
+      const enabled = point.inner ? toggles.innerText : toggles.text;
+      if (!enabled && phase !== 2 && phase !== 3) return null;
+      const looseX = phase === 2 ? Math.sin(index * 2.7) * point.size * settings.spread / 35 : 0;
+      const looseY = phase === 2 ? Math.cos(index * 1.9) * point.size * settings.spread / 35 : 0;
+      return <g key={`${point.x}-${point.y}`} data-contour={point.inner ? 'inner' : 'outer'} transform={`translate(${centerX + (point.x - centerX) * scatter + looseX} ${centerY + (point.y - centerY) * scatter + looseY}) rotate(${point.rotation})`}>{enabled ? <ContourTile shape={tileShape} hollow={hollow} size={point.size} radius={phase === 1 ? point.size * .45 : PHASES[phase].radius * point.size / 130} colors={colors} strokeWidth={Math.max(.65,minimumSide * .0011)} character={words[index % words.length] || 'A'} rotation={point.rotation}/> : phase === 3 ? <rect x={-point.size} y={-point.size} width={point.size * 2} height={point.size * 2} fill="none" stroke={colors.tile}/> : <circle r={point.size * .62} fill={colors.tile}/>}</g>;
+    })}</g> : null}
+    {hasSource ? <PosterTypography canvasWidth={canvasWidth} canvasHeight={canvasHeight} typography={typography} colors={colors} safeMargin={layout.safeMargin}/> : null}
+    <g className="editor-only guides" pointerEvents="none">
+      {layout.showGrid ? <>{Array.from({length:guideColumns - 1},(_,index)=><line key={`v${index}`} x1={(index + 1) * canvasWidth / guideColumns} y1="0" x2={(index + 1) * canvasWidth / guideColumns} y2={canvasHeight}/>)}{Array.from({length:guideRows - 1},(_,index)=><line key={`h${index}`} x1="0" y1={(index + 1) * canvasHeight / guideRows} x2={canvasWidth} y2={(index + 1) * canvasHeight / guideRows}/>)}</> : null}
+      {layout.showSafe ? <rect className="safe-guide" x={safe} y={safe} width={canvasWidth - safe * 2} height={canvasHeight - safe * 2}/> : null}
+    </g>
   </svg>;
 }
 
-function RangeRow({ label, value, min=0, max=100, unit='', onChange }) {
-  return <label className="control-row"><span>{label}</span><output>{value}{unit}</output><input type="range" min={min} max={max} value={value} onChange={e=>onChange(Number(e.target.value))}/></label>;
-}
-
-function Toggle({ label, checked, onChange }) { return <label className="toggle-row"><span>{label}</span><input type="checkbox" checked={checked} onChange={e=>onChange(e.target.checked)}/><i/></label>; }
-
-function Section({ title, children }) { return <section className="inspector-section"><h3>{title}<span>⌃</span></h3><div className="section-body">{children}</div></section>; }
-
-function Inspector({ phase, setPhase, settings, setSettings, text, setText, toggles, setToggles, colors, setColors, tileShape, setTileShape, hollowTiles, setHollowTiles, transparent, setTransparent }) {
-  const set = (k,v)=>setSettings(s=>({...s,[k]:v}));
-  const setColor = (k,v)=>setColors(current=>({...current,[k]:v}));
-  return <aside className="inspector">
-    <Section title="02　轮廓">
-      <RangeRow label="阈值" value={settings.threshold} max={255} onChange={v=>set('threshold',v)}/>
-      <RangeRow label="平滑" value={settings.smooth} onChange={v=>set('smooth',v)}/>
-      <RangeRow label="最小面积" value={settings.area} max={800} unit=" px²" onChange={v=>set('area',v)}/>
-      <div className="toggle-grid">
-        <Toggle label="反转前景" checked={settings.invert} onChange={v=>set('invert',v)}/>
-        <Toggle label="显示原图" checked={toggles.original} onChange={v=>setToggles(t=>({...t,original:v}))}/>
-        <Toggle label="显示主体" checked={toggles.shape} onChange={v=>setToggles(t=>({...t,shape:v}))}/>
-        <Toggle label="外轮廓文字" checked={toggles.text} onChange={v=>setToggles(t=>({...t,text:v}))}/>
-        <Toggle label="孔洞文字" checked={toggles.innerText} onChange={v=>setToggles(t=>({...t,innerText:v}))}/>
-      </div>
-    </Section>
-    <Section title="03　文字与样式">
-      <label className="field-row"><span>海报文字</span><input value={text} onChange={e=>setText(e.target.value)} /></label>
-      <div className="style-label">海报样式</div>
-      <div className="phase-tabs">{phases.map((item,index)=><button key={item.name} className={phase===index?'active':''} onClick={()=>setPhase(index)}>{item.name}</button>)}</div>
-      <div className="shape-setting"><span>文字底形</span><div className="shape-picker">
-        <button aria-label="正方形" title="正方形" className={tileShape==='square'?'active':''} onClick={()=>setTileShape('square')}><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="14" height="14"/></svg></button>
-        <button aria-label="圆形" title="圆形" className={tileShape==='circle'?'active':''} onClick={()=>setTileShape('circle')}><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/></svg></button>
-        <button aria-label="三角形" title="三角形" className={tileShape==='triangle'?'active':''} onClick={()=>setTileShape('triangle')}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8 18 17H2Z"/></svg></button>
-      </div></div>
-      <Toggle label="空心形状" checked={hollowTiles} onChange={setHollowTiles}/>
-      <RangeRow label="文字大小" value={settings.size} min={4} max={60} unit=" px" onChange={v=>set('size',v)}/>
-      <RangeRow label="文字密度" value={settings.density} unit="%" onChange={v=>set('density',v)}/>
-      <RangeRow label="扩散" value={settings.spread} unit="%" onChange={v=>set('spread',v)}/>
-      <div className="color-grid">
-        <label>文字颜色<input type="color" value={colors.text} onChange={e=>setColor('text',e.target.value)}/><code>{colors.text}</code></label>
-        <label>形状颜色<input type="color" value={colors.tile} onChange={e=>setColor('tile',e.target.value)}/><code>{colors.tile}</code></label>
-        <label>边框颜色<input type="color" value={colors.tileBorder} onChange={e=>setColor('tileBorder',e.target.value)}/><code>{colors.tileBorder}</code></label>
-        <label>主体颜色<input type="color" value={colors.subject} onChange={e=>setColor('subject',e.target.value)}/><code>{colors.subject}</code></label>
-        <label>背景颜色<input type="color" value={colors.background} onChange={e=>setColor('background',e.target.value)}/><code>{colors.background}</code></label>
-      </div>
-      <div className="font-row compact"><span>字体</span><button className="upload-font">上传 TTF / OTF</button></div>
-      <Toggle label="透明背景" checked={transparent} onChange={setTransparent}/>
-    </Section>
-  </aside>;
-}
-
 function App() {
-  const fileRef = useRef(null);
+  const imageInputRef = useRef(null);
+  const fontInputRef = useRef(null);
   const [sources,setSources] = useState([]);
   const [selected,setSelected] = useState(null);
+  const [templateId,setTemplateId] = useState('editorial');
   const [phase,setPhase] = useState(0);
-  const [text,setText] = useState('FORM FOLLOWS FEELING');
+  const [contourText,setContourText] = useState('FORM FOLLOWS FEELING');
+  const [tileShape,setTileShape] = useState('square');
+  const [hollow,setHollow] = useState(false);
+  const [canvasPreset,setCanvasPreset] = useState('social');
   const [zoom,setZoom] = useState(100);
   const [format,setFormat] = useState('PNG');
-  const [canvasPreset,setCanvasPreset] = useState('original');
+  const [exportScale,setExportScale] = useState(1);
   const [transparent,setTransparent] = useState(false);
   const [toast,setToast] = useState('');
+  const [customFontName,setCustomFontName] = useState('');
   const [toggles,setToggles] = useState({original:true,shape:false,text:true,innerText:true});
-  const [tileShape,setTileShape] = useState('square');
-  const [hollowTiles,setHollowTiles] = useState(false);
-  const [colors,setColors] = useState({subject:'#2457ff',background:'#000000',tile:'#ffffff',tileBorder:'#d8d8d8',text:'#000000'});
-  const [settings,setSettings] = useState({threshold:155,smooth:2,area:28,invert:false,size:22,spread:30,density:58});
-  const activeSource = sources.find(s=>s.id===selected);
-  const selectedCanvasPreset = CANVAS_PRESETS.find(item=>item.value===canvasPreset);
-  const canvasSize = selectedCanvasPreset?.width ? {width:selectedCanvasPreset.width,height:selectedCanvasPreset.height} : {width:activeSource?.width || DEFAULT_CANVAS.width,height:activeSource?.height || DEFAULT_CANVAS.height};
-  const actualSourceCount = sources.length;
-  const triggerImport = ()=>fileRef.current?.click();
-  const onFiles = async e => {
-    const files = Array.from(e.target.files||[]).slice(0,Math.max(0,5-actualSourceCount));
+  const [colors,setColors] = useState(TEMPLATES[0].colors);
+  const [settings,setSettings] = useState({threshold:155,smooth:2,area:28,invert:false,size:22,spread:22,density:58});
+  const [layout,setLayout] = useState({imageScale:100,imageX:0,imageY:0,showGrid:true,showSafe:true,safeMargin:5});
+  const [warp,setWarp] = useState({enabled:false,columns:6,rows:8,selected:0,cells:{}});
+  const [typography,setTypography] = useState({...TEMPLATES[0].typography,fontFamily:'Noto Sans SC'});
+  const activeSource = sources.find(source=>source.id === selected);
+  const selectedPreset = CANVAS_PRESETS.find(item=>item.value === canvasPreset);
+  const canvasSize = selectedPreset?.width ? {width:selectedPreset.width,height:selectedPreset.height} : {width:activeSource?.width || DEFAULT_CANVAS.width,height:activeSource?.height || DEFAULT_CANVAS.height};
+
+  const showToast = message => {
+    setToast(message);
+    window.setTimeout(()=>setToast(''),2200);
+  };
+  const importImages = async event => {
+    const files = Array.from(event.target.files || []).slice(0,Math.max(0,5 - sources.length));
     if (!files.length) return;
-    const next = await Promise.all(files.map(async (file,i)=>{
-      const url=await fileToDataUrl(file);
-      const dimensions=await imageDimensions(url);
-      return {id:Date.now()+i,name:file.name.replace(/\.[^.]+$/,''),url,...dimensions};
-    }));
-    setSources(current=>[...current,...next]);
-    setSelected(next[0].id);
-    setZoom(100);
-    setToast(`已识别 ${next.length} 张图片 · 画布 ${next[0].width} × ${next[0].height}`);
-    setTimeout(()=>setToast(''),2200);
-    e.target.value='';
+    try {
+      const next = await Promise.all(files.map(async (file,index)=>{
+        const url = await fileToDataUrl(file);
+        const dimensions = await imageDimensions(url);
+        return {id:Date.now() + index,name:file.name.replace(/\.[^.]+$/,''),url,...dimensions};
+      }));
+      setSources(current=>[...current,...next]);
+      setSelected(next[0].id);
+      setLayout(current=>({...current,imageScale:100,imageX:0,imageY:0}));
+      showToast(`已导入 ${next.length} 张图片`);
+    } catch {
+      showToast('图片读取失败，请更换文件');
+    }
+    event.target.value = '';
   };
   const removeSource = id => setSources(current=>{
-    const target=current.find(source=>source.id===id);
-    const next=current.filter(source=>source.id!==id);
-    if(selected===id) setSelected(next[0]?.id ?? null);
+    const next = current.filter(source=>source.id !== id);
+    if (selected === id) setSelected(next[0]?.id ?? null);
     return next;
   });
-  const exportImage = () => {
+  const applyTemplate = template => {
+    setTemplateId(template.id);
+    setColors(template.colors);
+    setTileShape(template.tileShape);
+    setHollow(template.hollow);
+    setPhase(template.phase);
+    setTypography(current=>({...current,...template.typography}));
+    setWarp(current=>({...current,...template.warp,cells:{},selected:0}));
+  };
+  const uploadFont = async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const family = `PosterFont-${Date.now()}`;
+      const font = new FontFace(family,await file.arrayBuffer());
+      await font.load();
+      document.fonts.add(font);
+      setCustomFontName(family);
+      setTypography(current=>({...current,fontFamily:family}));
+      showToast(`字体 ${file.name} 已载入`);
+    } catch {
+      showToast('字体载入失败');
+    }
+    event.target.value = '';
+  };
+  const exportPoster = () => {
     const svg = document.getElementById('artboard');
     if (!svg) return;
     const clone = svg.cloneNode(true);
+    clone.querySelectorAll('.editor-only').forEach(element=>element.remove());
     if (transparent) clone.querySelector('.canvas-background')?.setAttribute('fill','none');
-    const data = new XMLSerializer().serializeToString(clone);
-    if (format==='SVG') {
-      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([data],{type:'image/svg+xml'})); a.download=`轮廓文字-${phases[phase].name}.svg`; a.click();
-    } else {
-      const img=new Image(); const url=URL.createObjectURL(new Blob([data],{type:'image/svg+xml'})); img.onload=()=>{const c=document.createElement('canvas');c.width=canvasSize.width;c.height=canvasSize.height;const ctx=c.getContext('2d');if(!transparent){ctx.fillStyle=colors.background;ctx.fillRect(0,0,c.width,c.height)}ctx.drawImage(img,0,0,c.width,c.height);c.toBlob(blob=>{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`轮廓文字-${phases[phase].name}-${canvasSize.width}x${canvasSize.height}.png`;a.click();},'image/png');URL.revokeObjectURL(url)};img.src=url;
+    clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+    const serialized = new XMLSerializer().serializeToString(clone);
+    if (format === 'SVG') {
+      const url = URL.createObjectURL(new Blob([serialized],{type:'image/svg+xml'}));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `轮廓文字-${canvasSize.width}x${canvasSize.height}.svg`;
+      anchor.click();
+      window.setTimeout(()=>URL.revokeObjectURL(url),1000);
+      showToast('SVG 海报已导出');
+      return;
     }
-    setToast(`正在导出 ${format} 图片`); setTimeout(()=>setToast(''),1800);
+    showToast('正在生成高清海报…');
+    const image = new Image();
+    const svgUrl = URL.createObjectURL(new Blob([serialized],{type:'image/svg+xml'}));
+    image.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasSize.width * exportScale;
+      canvas.height = canvasSize.height * exportScale;
+      const context = canvas.getContext('2d');
+      context.scale(exportScale,exportScale);
+      context.drawImage(image,0,0,canvasSize.width,canvasSize.height);
+      canvas.toBlob(blob=>{
+        if (!blob) {
+          showToast('导出失败，请重试');
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `轮廓文字-${canvasSize.width * exportScale}x${canvasSize.height * exportScale}.png`;
+        anchor.click();
+        window.setTimeout(()=>URL.revokeObjectURL(url),1000);
+        showToast('PNG 海报已导出');
+      },'image/png');
+      URL.revokeObjectURL(svgUrl);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(svgUrl);
+      showToast('导出失败，请重试');
+    };
+    image.src = svgUrl;
   };
+
   return <div className="app-shell">
-    <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={onFiles}/>
-    <Topbar onImport={triggerImport} onExport={exportImage} format={format} setFormat={setFormat}/>
+    <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={importImages}/>
+    <input ref={fontInputRef} type="file" accept=".ttf,.otf,font/ttf,font/otf" hidden onChange={uploadFont}/>
+    <Topbar onImport={()=>imageInputRef.current?.click()} onExport={exportPoster} format={format} setFormat={setFormat} exportScale={exportScale} setExportScale={setExportScale}/>
     <aside className="control-sidebar">
-      <SourcePanel sources={sources} selected={selected} onSelect={setSelected} onImport={triggerImport} onRemove={removeSource}/>
-      <Inspector phase={phase} setPhase={setPhase} settings={settings} setSettings={setSettings} text={text} setText={setText} toggles={toggles} setToggles={setToggles} colors={colors} setColors={setColors} tileShape={tileShape} setTileShape={setTileShape} hollowTiles={hollowTiles} setHollowTiles={setHollowTiles} transparent={transparent} setTransparent={setTransparent}/>
+      <SourceSection sources={sources} selected={selected} onSelect={setSelected} onImport={()=>imageInputRef.current?.click()} onRemove={removeSource} layout={layout} setLayout={setLayout}/>
+      <LayoutSection templateId={templateId} onApplyTemplate={applyTemplate} layout={layout} setLayout={setLayout} warp={warp} setWarp={setWarp}/>
+      <ContourSection contourText={contourText} setContourText={setContourText} settings={settings} setSettings={setSettings} toggles={toggles} setToggles={setToggles} phase={phase} setPhase={setPhase} tileShape={tileShape} setTileShape={setTileShape} hollow={hollow} setHollow={setHollow} colors={colors} setColors={setColors}/>
+      <TypographySection typography={typography} setTypography={setTypography} onUploadFont={()=>fontInputRef.current?.click()} customFontName={customFontName} colors={colors} setColors={setColors}/>
+      <section className="inspector-section export-options"><div className="section-body"><label className="color-field"><span>画布背景</span><input type="color" value={colors.background} onChange={event=>setColors(current=>({...current,background:event.target.value}))}/><code>{colors.background}</code></label><Toggle label="透明底色" checked={transparent} onChange={setTransparent}/></div></section>
     </aside>
     <main className="workspace">
-      <div className="canvas-toolbar"><strong>海报画布</strong><label className="canvas-size"><span>尺寸</span><select aria-label="画布尺寸" value={canvasPreset} onChange={event=>{setCanvasPreset(event.target.value);setZoom(100)}}>{CANVAS_PRESETS.map(item=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label><span>{canvasSize.width} × {canvasSize.height} px</span><button onClick={()=>setZoom(z=>Math.max(50,z-10))}><Icon name="zoomOut"/></button><output>{zoom}%</output><button onClick={()=>setZoom(z=>Math.min(130,z+10))}><Icon name="zoomIn"/></button></div>
-      <div className="canvas-viewport"><div className="canvas-sheet" style={{transform:`scale(${zoom/100})`,aspectRatio:`${canvasSize.width}/${canvasSize.height}`}}><CanvasArt phase={phase} settings={settings} source={activeSource} toggles={toggles} customText={text} colors={colors} tileShape={tileShape} hollowTiles={hollowTiles} canvasWidth={canvasSize.width} canvasHeight={canvasSize.height}/></div></div>
+      <div className="canvas-toolbar">
+        <strong>海报画布</strong>
+        <label><span>尺寸</span><select aria-label="画布尺寸" value={canvasPreset} onChange={event=>{setCanvasPreset(event.target.value);setZoom(100)}}>{CANVAS_PRESETS.map(item=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+        <button className={layout.showGrid ? 'active' : ''} title="网格参考线" onClick={()=>setLayout(current=>({...current,showGrid:!current.showGrid}))}><Icon name="grid"/></button>
+        <button className={layout.showSafe ? 'active' : ''} title="安全边距" onClick={()=>setLayout(current=>({...current,showSafe:!current.showSafe}))}><Icon name="frame"/></button>
+        <span>{canvasSize.width} × {canvasSize.height}</span>
+        <button onClick={()=>setZoom(value=>Math.max(30,value - 8))}><Icon name="minus"/></button><output>{zoom}%</output><button onClick={()=>setZoom(value=>Math.min(130,value + 8))}><Icon name="plus"/></button>
+      </div>
+      <div className="canvas-viewport"><div className="canvas-sheet" style={{transform:`scale(${zoom / 100})`,aspectRatio:`${canvasSize.width}/${canvasSize.height}`}}><CanvasArt phase={phase} settings={settings} source={activeSource} toggles={toggles} contourText={contourText} colors={colors} tileShape={tileShape} hollow={hollow} canvasWidth={canvasSize.width} canvasHeight={canvasSize.height} layout={layout} setLayout={setLayout} warp={warp} setWarp={setWarp} typography={typography}/></div></div>
     </main>
     {toast ? <div className="toast">{toast}</div> : null}
   </div>;
